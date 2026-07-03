@@ -55,8 +55,12 @@ enum WavLoader {
             throw LoadError.unreadable("cannot build 16 kHz mono converter for \(url.lastPathComponent)")
         }
 
-        // Pull loop mirrors AudioRecorder.convert: feed the whole file once, then
-        // drain the converter across as many output buffers as the resample needs.
+        // Pull loop: feed the whole file once, then signal `.endOfStream` so the
+        // converter flushes its resampler tail, and keep draining output buffers
+        // until it reports `.endOfStream` back. Signalling `.noDataNow` instead
+        // would make the converter hold back the samples still inside its filter
+        // (a few frames on a 44.1 kHz downsample, ~half the audio on an 8 kHz
+        // upsample), truncating the final phoneme of the fixture.
         let ratio = targetFormat.sampleRate / inputFormat.sampleRate
         let capacity = AVAudioFrameCount(Double(inBuffer.frameLength) * ratio + 4096)
         var out: [Float] = []
@@ -68,7 +72,7 @@ enum WavLoader {
             var error: NSError?
             let status = converter.convert(to: outBuffer, error: &error) { _, outStatus in
                 if fedInput {
-                    outStatus.pointee = .noDataNow
+                    outStatus.pointee = .endOfStream
                     return nil
                 }
                 fedInput = true
@@ -82,7 +86,7 @@ enum WavLoader {
             if frames > 0, let channelData = outBuffer.floatChannelData?[0] {
                 out.append(contentsOf: UnsafeBufferPointer(start: channelData, count: frames))
             }
-            if status != .haveData { break }
+            if status == .endOfStream { break }
         }
         return out
     }
