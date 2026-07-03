@@ -39,6 +39,10 @@ transcribe → inject:
 - `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy mode.
 - `UtteranceStateMachine.swift` — pure recording/transcription bookkeeping
   with monotonic IDs.
+- `PasteSequencer.swift` — pure paste ordering: flushes outcomes in strict
+  utterance-ID order with >= 300 ms between actual pastes.
+- `LostReleaseWatchdog.swift` — pure watchdog decision: re-arm on a genuine
+  long hold vs end on a lost release.
 - `WavLoader.swift` — CLI-only `AVAudioFile` → 16 kHz mono Float32 loader.
 - `CLI.swift` — `CLIArguments` parser + `CLIRunner` for `--transcribe-file`.
 - `TextInjector.swift` — pasteboard + synthetic Cmd+V.
@@ -144,7 +148,7 @@ those safeguards if refactoring.
 ## Dual-engine routing (Parakeet + Whisper)
 
 `DictationPipeline` gates the raw buffer, routes it to one engine, transcribes,
-then filters — this is the single reuse point for both the GUI and the CLI
+then filters; it is the single reuse point for both the GUI and the CLI
 (`CLI.swift`). Routing is a pure function (`EngineRouter.route`):
 
 | language setting | accuracyMode | engine | hint passed |
@@ -158,7 +162,7 @@ There is deliberately no silent cross-engine fallback: a warm-up/transcribe
 failure on the routed engine surfaces as an error, never a different engine's
 output passed off as the requested one. The one sanctioned exception is a
 Parakeet launch failure, which flips a `forceWhisper` override (equivalent to
-Accuracy Mode) — Whisper is a safe universal superset, so that direction is
+Accuracy Mode): Whisper is a safe universal superset, so that direction is
 always correct.
 
 ### FluidAudio's `Language` enum has no Norwegian
@@ -171,12 +175,12 @@ The menu's Language ▸ submenu lists it explicitly under "Other (Whisper)"
 alongside Japanese/Chinese/Korean/Arabic. Also note: the FluidAudio module
 exports a `public struct FluidAudio` that shadows the module name, so
 `FluidAudio.Language.init(rawValue:)` fails to resolve ("type FluidAudio has
-no member Language") — use the bare `Language` name after `import FluidAudio`.
+no member Language"); use the bare `Language` name after `import FluidAudio`.
 
 ### VAD threshold: 0.70, not the library default 0.85
 
 `VadConfig.defaultThreshold` defaults to **0.85** in FluidAudio (verified in
-`VadTypes.swift`), which under-triggers on quiet Danish speech — utterances
+`VadTypes.swift`), which under-triggers on quiet Danish speech: utterances
 get silently gated as silence. `SpeechGate` overrides it to **0.70**. A false
 accept at 0.70 is cheap to absorb (one extra Parakeet call, ~ms-scale, ANE) and
 is still caught by the post-ASR hallucination filter; a false reject at 0.85
@@ -189,7 +193,7 @@ recovery. Lower, not higher, is the safe direction to bias this knob.
 (`Configurations.swift`): `…, compressionRatioThreshold, logProbThreshold,
 firstTokenLogProbThreshold, noSpeechThreshold, concurrentWorkerCount,
 chunkingStrategy`. Swift requires labeled arguments in **declaration order**,
-not call-site order — a decode call that lists `noSpeechThreshold:` before
+not call-site order: a decode call that lists `noSpeechThreshold:` before
 `logProbThreshold:`/`compressionRatioThreshold:` (a very natural way to group
 "the anti-hallucination levers") **will not compile**. Also worth knowing: the
 canonical anti-hallucination values (`noSpeechThreshold: 0.6, logProbThreshold:
@@ -204,34 +208,34 @@ snippet.
 
 Do not implement the transcription hang guard with `withThrowingTaskGroup`:
 structured concurrency must cancel **and await** every child before the group
-can rethrow, and a wedged Core ML inference ignores cooperative cancellation —
+can rethrow, and a wedged Core ML inference ignores cooperative cancellation,
 so a "timeout" child that throws at the deadline still blocks until the
 inference actually returns (i.e. never, for a true hang). That leaves the menu
-pinned on "Transcribing…" and the utterance forever in flight — exactly the
+pinned on "Transcribing…" and the utterance forever in flight, exactly the
 failure the guard exists to bound. `AsyncTimeout.run` exists for this: an
 unstructured continuation-based race that abandons the wedged body and fires
 at the deadline (regression-tested in `AsyncTimeoutTests`).
 
 ## Testing
 
-- **Executable targets are unit-testable directly** — SPM has supported test
+- **Executable targets are unit-testable directly**: SPM has supported test
   targets depending on executable targets since **Swift 5.5**; `@testable
   import LocalDictation` from `Tests/LocalDictationTests` works with no
   library-target split. Don't reintroduce one "to make testing possible"; it
   isn't needed and it would move every TCC-sensitive file.
 - `swift test` runs the pure-logic suite (state machines, router, gate logic,
-  hallucination filter, pipeline via fakes, CLI argument parsing) — no models,
+  hallucination filter, pipeline via fakes, CLI argument parsing): no models,
   no mic, seconds to run, safe for default CI.
 - `scripts/test-cli.sh` is the model-touching e2e layer: it drives the real
   release binary's `--transcribe-file` mode against `scripts/make-fixtures.sh`
   fixtures (Danish → Parakeet, English forced through `--engine whisper`,
   digital silence → exit 3 **and** `dropped: silence`/`gate=silence` on
-  stderr — exit 3 alone is ambiguous with a hallucination-filter drop after a
-  VAD fail-open) and needs Parakeet v3 + Whisper large-v3 already cached
+  stderr, because exit 3 alone is ambiguous with a hallucination-filter drop
+  after a VAD fail-open) and needs Parakeet v3 + Whisper large-v3 already cached
   locally. Treat it as manual/nightly, not part of `swift test`.
 - CLI mode (`--transcribe-file <path> [--engine …] [--language …] [--accuracy]
   [--no-vad-gate] [--no-hallucination-filter] [--json]`) constructs no
-  `AudioRecorder`/`HotkeyMonitor`/`MenuBar`/`NSApp` — it requests zero TCC
+  `AudioRecorder`/`HotkeyMonitor`/`MenuBar`/`NSApp`; it requests zero TCC
   permissions, so it's safe to run from CI or scripts on a machine that has
   never granted this app anything. Exit codes: `0` transcript emitted, `1` bad
   args/unreadable file, `2` model/transcription error, `3` dropped by the gate

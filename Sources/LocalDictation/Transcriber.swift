@@ -2,7 +2,10 @@ import Foundation
 import WhisperKit
 
 /// Wraps WhisperKit. The model is loaded lazily on the first transcription
-/// so app launch stays fast; the ~600 MB download happens on first use.
+/// so app launch stays fast. The ~1.5 GB full-precision model files are
+/// fetched by the GUI's background pre-download at launch (`predownloadModel`,
+/// spawned by `AppDelegate` once Parakeet is ready); if that hasn't finished
+/// (or failed offline), the first use downloads whatever is missing.
 actor Transcriber: TranscriptionEngine {
     /// Accuracy / broad-language backend. `nonisolated` so routing and menu code
     /// can branch on it without an `await` hop.
