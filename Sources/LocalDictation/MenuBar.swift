@@ -1,4 +1,5 @@
 import AppKit
+import FluidAudio   // Language.allCases — the 28 Parakeet codes for the submenu
 
 final class MenuBar {
     enum State {
@@ -17,6 +18,18 @@ final class MenuBar {
     private let statusMenuItem = NSMenuItem(title: "Loading…", action: nil, keyEquivalent: "")
     private let recordMenuItem = NSMenuItem(title: "Start Recording", action: nil, keyEquivalent: "")
 
+    /// Language ▸ submenu (Auto · Parakeet's 28 · Whisper-only extras) and the
+    /// Accuracy Mode checkbox. MenuBar only renders and reports; the persisted
+    /// state lives in `LanguageSetting`, owned by `AppDelegate`.
+    private let languageMenu = NSMenu()
+    private let accuracyMenuItem = NSMenuItem(title: "Accuracy Mode (Whisper, all languages)",
+                                              action: nil, keyEquivalent: "")
+
+    /// Whisper-only pins offered below the Parakeet set. Norwegian is here on
+    /// purpose: FluidAudio's `Language` enum has no "no"/"nb", so Norwegian must
+    /// route to Whisper (see `EngineRouter`).
+    private static let whisperOnlyCodes = ["no", "ja", "zh", "ko", "ar"]
+
     /// Rotating SF Symbol shown (in Naples yellow) while Whisper transcribes.
     private var spinnerTimer: Timer?
     private var spinnerAngle: CGFloat = 0
@@ -27,6 +40,10 @@ final class MenuBar {
     var onOpenInputMonitoring: (() -> Void)?
     var onOpenMicrophone: (() -> Void)?
     var onToggleRecord: (() -> Void)?
+    /// Fired with "auto" or an ISO code when the user picks a language.
+    var onSelectLanguage: ((String) -> Void)?
+    /// Fired with the new value when the user toggles Accuracy Mode.
+    var onToggleAccuracy: ((Bool) -> Void)?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -55,6 +72,19 @@ final class MenuBar {
         menu.addItem(recordMenuItem)
         menu.addItem(.separator())
 
+        // Language ▸ submenu + Accuracy Mode checkbox. State additions are menu
+        // ITEMS only — the State enum above keeps exactly its 5 cases.
+        configureLanguageMenu()
+        let languageItem = NSMenuItem(title: "Language", action: nil, keyEquivalent: "")
+        languageItem.submenu = languageMenu
+        menu.addItem(languageItem)
+
+        accuracyMenuItem.target = self
+        accuracyMenuItem.action = #selector(toggleAccuracy)
+        accuracyMenuItem.toolTip = "Route every utterance to Whisper large-v3 — slower, most accurate, all languages."
+        menu.addItem(accuracyMenuItem)
+        menu.addItem(.separator())
+
         let micItem = NSMenuItem(title: "Open Microphone settings…",
                                  action: #selector(openMicrophone),
                                  keyEquivalent: "")
@@ -78,6 +108,82 @@ final class MenuBar {
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    /// Auto ✓ · the 28 FluidAudio `Language` cases (Parakeet, low latency) ·
+    /// separator · a curated "Other (Whisper)" list of pins Parakeet can't do.
+    /// Each selectable item carries its "auto"/ISO code in `representedObject`
+    /// so one action handles them all and checkmarks are a simple code compare.
+    private func configureLanguageMenu() {
+        let auto = NSMenuItem(title: "Auto", action: #selector(selectLanguage(_:)), keyEquivalent: "")
+        auto.target = self
+        auto.representedObject = "auto"
+        // Known accepted limitation (documented here rather than papered over):
+        // Auto detects only among Parakeet's 28; other languages need a pin.
+        auto.toolTip = "Detects among Parakeet's 28 languages. For Norwegian, Japanese, Chinese, "
+                     + "Korean or Arabic, pin the language below or enable Accuracy Mode."
+        languageMenu.addItem(auto)
+        languageMenu.addItem(.separator())
+
+        for code in Self.displaySorted(Language.allCases.map(\.rawValue)) {
+            languageMenu.addItem(languageItem(code: code))
+        }
+
+        languageMenu.addItem(.separator())
+        // nil action → AppKit auto-disables it: a section header, not a choice.
+        languageMenu.addItem(NSMenuItem(title: "Other (Whisper)", action: nil, keyEquivalent: ""))
+        for code in Self.whisperOnlyCodes {
+            languageMenu.addItem(languageItem(code: code))
+        }
+    }
+
+    private func languageItem(code: String) -> NSMenuItem {
+        let item = NSMenuItem(title: Self.displayName(code),
+                              action: #selector(selectLanguage(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.representedObject = code
+        return item
+    }
+
+    /// Human-readable name in the user's UI locale ("da" → "Danish"/"dansk").
+    private static func displayName(_ code: String) -> String {
+        Locale.current.localizedString(forLanguageCode: code) ?? code
+    }
+
+    private static func displaySorted(_ codes: [String]) -> [String] {
+        codes.sorted {
+            displayName($0).localizedCaseInsensitiveCompare(displayName($1)) == .orderedAscending
+        }
+    }
+
+    /// Render the current language pin (checkmark). Called by `AppDelegate` at
+    /// launch with the persisted value and again after each selection.
+    func setLanguage(_ code: String) {
+        DispatchQueue.main.async { [self] in
+            for item in languageMenu.items {
+                item.state = ((item.representedObject as? String) == code) ? .on : .off
+            }
+        }
+    }
+
+    /// Render the Accuracy Mode checkbox.
+    func setAccuracyMode(_ enabled: Bool) {
+        DispatchQueue.main.async { [self] in
+            accuracyMenuItem.state = enabled ? .on : .off
+        }
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String else { return }
+        setLanguage(code)
+        onSelectLanguage?(code)
+    }
+
+    @objc private func toggleAccuracy() {
+        let enabled = accuracyMenuItem.state != .on
+        setAccuracyMode(enabled)
+        onToggleAccuracy?(enabled)
     }
 
     func update(_ state: State) {

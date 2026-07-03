@@ -10,12 +10,17 @@ import CoreGraphics
 /// right Option (left = 58, right = 61), and the alternate bit in the
 /// event flags to learn whether the change was a press or a release.
 final class HotkeyMonitor {
-    enum Transition { case pressed, released }
+    /// Press/release transitions come from the pure `HotkeyStateMachine`; the
+    /// typealias keeps `HotkeyMonitor.Transition` as the callers' spelling.
+    typealias Transition = HotkeyStateMachine.Transition
 
     private let onTransition: (Transition) -> Void
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private var isDown = false
+    /// The "is this a press or a release, and did the tap die mid-hold?"
+    /// bookkeeping lives in the pure, unit-tested state machine; this class
+    /// keeps only the CGEventTap plumbing around it.
+    private var keyState = HotkeyStateMachine()
     private var recreateScheduled = false
 
     private static let kVKRightOption: Int64 = 61
@@ -70,7 +75,7 @@ final class HotkeyMonitor {
         }
         eventTap = nil
         runLoopSource = nil
-        isDown = false
+        keyState = HotkeyStateMachine()
     }
 
     private func handle(type: CGEventType, event: CGEvent) {
@@ -80,10 +85,9 @@ final class HotkeyMonitor {
             // event was almost certainly swallowed while the tap was dead. Emit
             // a synthetic release so recording can't get stuck on, and reset to
             // a known-idle state so the next real press is detected.
-            if isDown {
-                isDown = false
+            if let transition = keyState.handleTapDisabledWhileHeld() {
                 Log.info("tap disabled while key held — synthesizing release", "hotkey")
-                dispatch(.released)
+                dispatch(transition)
             }
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             scheduleRecreateIfNeeded()
@@ -100,15 +104,15 @@ final class HotkeyMonitor {
         let flags = event.flags
         let optionHeld = flags.contains(.maskAlternate)
 
-        if optionHeld && !isDown {
-            isDown = true
-            Log.info("right-option pressed", "hotkey")
-            dispatch(.pressed)
-        } else if !optionHeld && isDown {
-            isDown = false
-            Log.info("right-option released", "hotkey")
-            dispatch(.released)
+        // The press/release edge decision is delegated to the pure state machine;
+        // a duplicate reading (no edge) returns nil and is dropped here exactly
+        // as the old inline `isDown` checks did.
+        guard let transition = keyState.handleFlagsChanged(optionHeld: optionHeld) else { return }
+        switch transition {
+        case .pressed:  Log.info("right-option pressed", "hotkey")
+        case .released: Log.info("right-option released", "hotkey")
         }
+        dispatch(transition)
     }
 
     /// A `.listenOnly` head-insert tap on recent macOS gets disabled repeatedly
