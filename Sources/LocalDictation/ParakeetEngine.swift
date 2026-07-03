@@ -16,29 +16,51 @@ actor ParakeetEngine: TranscriptionEngine {
     /// require an `await`, which a synchronous `isWarmedUp` getter cannot do.
     private var manager: AsrManager?
 
+    /// In-flight load memoization. Actor methods are reentrant at `await`s, so a
+    /// bare `guard manager == nil` check-then-await would let a second concurrent
+    /// caller start a second model load. All callers await this one task; it is
+    /// cleared on failure so a retry can start a fresh load.
+    private var loadTask: Task<AsrManager, Error>?
+
     var isWarmedUp: Bool { manager != nil }
 
     func warmUp() async throws {
         guard manager == nil else { return }   // idempotent
-        let t0 = Date()
-        // v3 is the multilingual TDT model whose script-filter `language:` hint we
-        // rely on for routing; the models are already cached on this machine so the
-        // "download" is a fast cache hit.
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
-        let m = AsrManager(config: .default, models: models)
+        let task: Task<AsrManager, Error>
+        if let existing = loadTask {
+            task = existing                     // a load is already in flight — join it
+        } else {
+            task = Task {
+                let t0 = Date()
+                // v3 is the multilingual TDT model whose script-filter `language:` hint we
+                // rely on for routing; the models are already cached on this machine so the
+                // "download" is a fast cache hit.
+                let models = try await AsrModels.downloadAndLoad(version: .v3)
+                let m = AsrManager(config: .default, models: models)
 
-        // Prime the ANE with 1 s of silence so the very first *real* utterance
-        // pays no Core ML cold-compile tax. Best-effort: a too-short/invalid prime
-        // input can throw, and we don't care — the point is to force graph warm-up.
-        var primeState = TdtDecoderState.make()   // v3 uses the default 2 decoder layers
-        _ = try? await m.transcribe(
-            [Float](repeating: 0, count: 16_000),
-            decoderState: &primeState,
-            language: nil
-        )
+                // Prime the ANE with 1 s of silence so the very first *real* utterance
+                // pays no Core ML cold-compile tax. Best-effort: a too-short/invalid prime
+                // input can throw, and we don't care — the point is to force graph warm-up.
+                var primeState = TdtDecoderState.make()   // v3 uses the default 2 decoder layers
+                _ = try? await m.transcribe(
+                    [Float](repeating: 0, count: 16_000),
+                    decoderState: &primeState,
+                    language: nil
+                )
 
-        manager = m
-        Log.info("parakeet warmed up in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s", "parakeet")
+                Log.info("parakeet warmed up in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s", "parakeet")
+                return m
+            }
+            loadTask = task
+        }
+        do {
+            manager = try await task.value
+        } catch {
+            // Only the task that failed clears the slot: a stale awaiter must not
+            // wipe out a NEWER retry another caller already started.
+            if loadTask == task { loadTask = nil }
+            throw error
+        }
     }
 
     /// Transcribe a 16 kHz mono Float32 buffer.

@@ -21,6 +21,11 @@ actor Transcriber: TranscriptionEngine {
     static let defaultModel = "openai_whisper-large-v3-v20240930"
 
     private var pipe: WhisperKit?
+    /// In-flight load memoization. Actor methods are reentrant at `await`s, so a
+    /// bare check-then-await in `loadedPipe()` would let a second caller kick off
+    /// a second concurrent multi-GB model load. All callers await this one task;
+    /// it is cleared on failure so a retry can start a fresh load.
+    private var loadTask: Task<WhisperKit, Error>?
     private let modelName: String
 
     init(modelName: String? = nil) {
@@ -85,26 +90,39 @@ actor Transcriber: TranscriptionEngine {
 
     private func loadedPipe() async throws -> WhisperKit {
         if let pipe = pipe { return pipe }
-        Log.info("loading WhisperKit model='\(modelName)' (first call may download ~600 MB)", "whisper")
+        let task: Task<WhisperKit, Error>
+        if let existing = loadTask {
+            task = existing                     // a load is already in flight — join it
+        } else {
+            task = Task { [modelName] in
+                Log.info("loading WhisperKit model='\(modelName)' (first call may download ~1.5 GB)", "whisper")
+                // prewarm + load force the Core ML encoder and decoder to
+                // compile and warm up *now*, instead of lazy-loading on the
+                // first transcribe call (which would otherwise add ~10-30 s
+                // of cold-start latency to the very first dictation).
+                let config = WhisperKitConfig(
+                    model: modelName,
+                    verbose: false,
+                    prewarm: true,
+                    load: true,
+                    download: true
+                )
+                let t0 = Date()
+                let pipe = try await WhisperKit(config)
+                let dt = Date().timeIntervalSince(t0)
+                Log.info("WhisperKit loaded (prewarmed) in \(String(format: "%.2f", dt))s, state=\(pipe.modelState)", "whisper")
+                return pipe
+            }
+            loadTask = task
+        }
         do {
-            // prewarm + load force the Core ML encoder and decoder to
-            // compile and warm up *now*, instead of lazy-loading on the
-            // first transcribe call (which would otherwise add ~10-30 s
-            // of cold-start latency to the very first dictation).
-            let config = WhisperKitConfig(
-                model: modelName,
-                verbose: false,
-                prewarm: true,
-                load: true,
-                download: true
-            )
-            let t0 = Date()
-            let pipe = try await WhisperKit(config)
-            let dt = Date().timeIntervalSince(t0)
-            Log.info("WhisperKit loaded (prewarmed) in \(String(format: "%.2f", dt))s, state=\(pipe.modelState)", "whisper")
+            let pipe = try await task.value
             self.pipe = pipe
             return pipe
         } catch {
+            // Only the task that failed clears the slot: a stale awaiter must not
+            // wipe out a NEWER retry another caller already started.
+            if loadTask == task { loadTask = nil }
             Log.error("WhisperKit init threw: \(error)", "whisper")
             throw error
         }
