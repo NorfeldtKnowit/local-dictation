@@ -24,8 +24,10 @@ actor Transcriber: TranscriptionEngine {
     /// In-flight load memoization. Actor methods are reentrant at `await`s, so a
     /// bare check-then-await in `loadedPipe()` would let a second caller kick off
     /// a second concurrent multi-GB model load. All callers await this one task;
-    /// it is cleared on failure so a retry can start a fresh load.
-    private var loadTask: Task<WhisperKit, Error>?
+    /// it is cleared on failure so a retry can start a fresh load. `Void`-typed
+    /// (the task assigns `pipe` itself) because `WhisperKit` is not `Sendable`
+    /// and must not cross the task boundary as a result value.
+    private var loadTask: Task<Void, Error>?
     private let modelName: String
 
     init(modelName: String? = nil) {
@@ -90,11 +92,13 @@ actor Transcriber: TranscriptionEngine {
 
     private func loadedPipe() async throws -> WhisperKit {
         if let pipe = pipe { return pipe }
-        let task: Task<WhisperKit, Error>
+        let task: Task<Void, Error>
         if let existing = loadTask {
             task = existing                     // a load is already in flight — join it
         } else {
-            task = Task { [modelName] in
+            // Task {} inherits this actor's isolation, so the body may assign
+            // self.pipe directly and WhisperKit never crosses a Sendable boundary.
+            task = Task {
                 Log.info("loading WhisperKit model='\(modelName)' (first call may download ~1.5 GB)", "whisper")
                 // prewarm + load force the Core ML encoder and decoder to
                 // compile and warm up *now*, instead of lazy-loading on the
@@ -111,14 +115,12 @@ actor Transcriber: TranscriptionEngine {
                 let pipe = try await WhisperKit(config)
                 let dt = Date().timeIntervalSince(t0)
                 Log.info("WhisperKit loaded (prewarmed) in \(String(format: "%.2f", dt))s, state=\(pipe.modelState)", "whisper")
-                return pipe
+                self.pipe = pipe
             }
             loadTask = task
         }
         do {
-            let pipe = try await task.value
-            self.pipe = pipe
-            return pipe
+            try await task.value
         } catch {
             // Only the task that failed clears the slot: a stale awaiter must not
             // wipe out a NEWER retry another caller already started.
@@ -126,5 +128,10 @@ actor Transcriber: TranscriptionEngine {
             Log.error("WhisperKit init threw: \(error)", "whisper")
             throw error
         }
+        guard let pipe else {
+            // Unreachable: a successfully completed load task always set `pipe`.
+            throw EngineError.notReady
+        }
+        return pipe
     }
 }
