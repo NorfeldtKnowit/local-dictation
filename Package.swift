@@ -19,6 +19,11 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio")
             ],
             path: "Sources/LocalDictation"
+        ),
+        .testTarget(
+            name: "LocalDictationTests",
+            dependencies: ["LocalDictation"],
+            path: "Tests/LocalDictationTests"
         )
     ]
 )
