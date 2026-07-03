@@ -46,13 +46,24 @@ EN_OUT="$($BIN --transcribe-file "$FIXTURES/en.aiff" --engine whisper --language
 echo "$EN_OUT"
 echo "$EN_OUT" | grep -qi "hello" || fail "English (whisper) transcript missing expected word 'hello'"
 
-# 3. Silence fixture must be gated out before ever reaching an engine (exit 3).
+# 3. Silence fixture must be gated out before ever reaching an engine.
+#    Exit 3 alone is NOT enough: the post-ASR hallucination filter also maps to
+#    exit 3, so a broken/unavailable VAD that fails open (gate=vadUnavailable),
+#    sends the raw silence to Parakeet, and gets a blocklisted ghost back would
+#    still exit 3. Grep the stderr diagnostics for the VAD-gate drop reason
+#    specifically so that regression can't masquerade as a correctly gated run.
 echo "-- silence -> gated --"
+SILENCE_OUT="$(mktemp)"
 set +e
-$BIN --transcribe-file "$FIXTURES/silence.wav" >/tmp/local-dictation-silence.out 2>&1
+$BIN --transcribe-file "$FIXTURES/silence.wav" >"$SILENCE_OUT" 2>&1
 SILENCE_EXIT=$?
 set -e
-cat /tmp/local-dictation-silence.out
+cat "$SILENCE_OUT"
 [ "$SILENCE_EXIT" -eq 3 ] || fail "silence.wav exited $SILENCE_EXIT, expected 3"
+grep -q "dropped: silence" "$SILENCE_OUT" \
+    || fail "silence.wav was not dropped by the VAD gate (expected 'dropped: silence' on stderr — hallucination-filter drop or VAD fail-open?)"
+grep -q "gate=silence" "$SILENCE_OUT" \
+    || fail "silence.wav gate decision was not 'silence' (VAD unavailable / fail-open path taken?)"
+rm -f "$SILENCE_OUT"
 
 echo "CLI e2e: OK"
