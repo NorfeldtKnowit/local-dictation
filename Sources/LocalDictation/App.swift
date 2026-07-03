@@ -246,19 +246,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor in
             do {
-                let outcome = try await AsyncTimeout.run(seconds: Self.transcriptionTimeout) { [pipeline, menuBar] in
+                // Warm the routed engine OUTSIDE the hang guard: a Whisper first
+                // use can legitimately cold-load for minutes (download + Core ML
+                // compile), and the menu already shows that via onColdLoad. Only
+                // the actual per-utterance inference below gets the 120 s bound.
+                _ = try await pipeline.prepareEngine(
+                    language: language,
+                    accuracyMode: accuracy,
+                    onColdLoad: { [menuBar] kind in
+                        // First routed use of a cold engine (in practice:
+                        // Whisper via Accuracy Mode / a non-Parakeet pin).
+                        // Reuses the existing .loading state — no 6th state.
+                        menuBar.update(.loading(kind == .whisper
+                            ? "Loading Whisper model (first use)…"
+                            : "Loading Parakeet model…"))
+                    }
+                )
+                // If a cold load repainted the menu to .loading, restore the
+                // correct state (listening/transcribing) now that the engine is warm.
+                refreshMenuState()
+                let outcome = try await AsyncTimeout.run(seconds: Self.transcriptionTimeout) { [pipeline] in
+                    // process re-warms internally, but after prepareEngine that
+                    // is an idempotent no-op — kept as a safety net only.
                     try await pipeline.process(
                         samples: samples,
                         language: language,
-                        accuracyMode: accuracy,
-                        onColdLoad: { kind in
-                            // First routed use of a cold engine (in practice:
-                            // Whisper via Accuracy Mode / a non-Parakeet pin).
-                            // Reuses the existing .loading state — no 6th state.
-                            menuBar.update(.loading(kind == .whisper
-                                ? "Loading Whisper model (first use)…"
-                                : "Loading Parakeet model…"))
-                        }
+                        accuracyMode: accuracy
                     )
                 }
                 utterance.settled(id)

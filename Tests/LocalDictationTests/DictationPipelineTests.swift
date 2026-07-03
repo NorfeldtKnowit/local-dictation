@@ -139,23 +139,63 @@ final class DictationPipelineTests: XCTestCase {
         XCTAssertEqual(wCount, 1)
     }
 
-    func testColdLoadCallbackFiresOncePerEngine() async throws {
-        // Parakeet starts cold: the first process fires the callback, warms it,
-        // and a second process (now warm) must NOT fire again.
+    func testPrepareEngineColdLoadCallbackFiresOncePerEngine() async throws {
+        // Parakeet starts cold: the first prepareEngine fires the callback and
+        // warms it; a second prepareEngine (now warm) must NOT fire again.
         let parakeet = FakeEngine(kind: .parakeet, output: "ok", startWarm: false)
         let whisper = FakeEngine(kind: .whisper, output: "ok", startWarm: true)
         let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
         let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
         let recorder = ColdLoadRecorder()
 
-        _ = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false,
-                                       onColdLoad: { recorder.record($0) })
-        _ = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false,
-                                       onColdLoad: { recorder.record($0) })
+        let first = try await pipeline.prepareEngine(language: "da", accuracyMode: false,
+                                                     onColdLoad: { recorder.record($0) })
+        let second = try await pipeline.prepareEngine(language: "da", accuracyMode: false,
+                                                      onColdLoad: { recorder.record($0) })
 
+        XCTAssertEqual(first, .parakeet)
+        XCTAssertEqual(second, .parakeet)
         XCTAssertEqual(recorder.kinds, [.parakeet])
         let warmUps = await parakeet.warmUpCount
         XCTAssertEqual(warmUps, 2)   // warmUp called both times, but idempotent inside
+    }
+
+    func testPrepareEngineHonorsForcedEngineAndAccuracy() async throws {
+        // "da" would route to Parakeet, but a forced engine / Accuracy Mode must
+        // warm Whisper only — a Whisper CLI run must not require Parakeet models.
+        let parakeet = FakeEngine(kind: .parakeet, output: "ok", startWarm: false)
+        let whisper = FakeEngine(kind: .whisper, output: "ok", startWarm: false)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let forced = try await pipeline.prepareEngine(language: "da", accuracyMode: false,
+                                                      forcedEngine: .whisper)
+        XCTAssertEqual(forced, .whisper)
+        let accuracy = try await pipeline.prepareEngine(language: "da", accuracyMode: true)
+        XCTAssertEqual(accuracy, .whisper)
+
+        let pWarmUps = await parakeet.warmUpCount
+        let wWarmUps = await whisper.warmUpCount
+        XCTAssertEqual(pWarmUps, 0)
+        XCTAssertEqual(wWarmUps, 2)
+    }
+
+    func testProcessStillWarmsLazilyAsSafetyNet() async throws {
+        // Callers are expected to prepareEngine first, but process must keep its
+        // internal idempotent warm-up so a direct call on a cold engine still works.
+        let parakeet = FakeEngine(kind: .parakeet, output: "ok", startWarm: false)
+        let whisper = FakeEngine(kind: .whisper, output: "ok", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+        let recorder = ColdLoadRecorder()
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false,
+                                             onColdLoad: { recorder.record($0) })
+
+        XCTAssertEqual(out.text, "ok")
+        XCTAssertEqual(recorder.kinds, [.parakeet])
+        let warmUps = await parakeet.warmUpCount
+        XCTAssertEqual(warmUps, 1)
     }
 
     func testHallucinationFilteredOutcome() async throws {

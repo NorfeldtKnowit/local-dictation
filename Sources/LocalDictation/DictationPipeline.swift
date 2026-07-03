@@ -49,6 +49,27 @@ actor DictationPipeline {
         try await parakeet.warmUp()
     }
 
+    /// Route and warm the engine the given settings select, WITHOUT running any
+    /// audio through it. Idempotent: warming an already-warm engine is a no-op.
+    ///
+    /// This exists so callers can pay a possibly-minutes-long cold load (Whisper's
+    /// first-ever download/compile) OUTSIDE any per-utterance hang guard: the GUI
+    /// calls this before wrapping `process` in its 120 s timeout, and the CLI uses
+    /// it to warm only the engine a run will actually touch.
+    /// - Returns: the engine kind that was selected and warmed.
+    func prepareEngine(language: String,
+                       accuracyMode: Bool,
+                       forcedEngine: EngineKind? = nil,
+                       onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> EngineKind {
+        let kind = forcedEngine ?? EngineRouter.route(language: language, accuracyMode: accuracyMode)
+        let engine = (kind == .parakeet) ? parakeet : whisper
+        // Surface the cold-load BEFORE the (possibly minutes-long) warm-up so the
+        // UI reflects it immediately; never fired for an already-warm engine.
+        if await !engine.isWarmedUp { onColdLoad?(kind) }
+        try await engine.warmUp()
+        return kind
+    }
+
     /// Run one utterance end-to-end.
     /// - Parameters:
     ///   - samples: 16 kHz mono Float32 capture buffer.
