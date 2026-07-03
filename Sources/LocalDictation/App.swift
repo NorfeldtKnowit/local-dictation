@@ -246,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Task { @MainActor in
             do {
-                let outcome = try await Self.withTimeout(seconds: Self.transcriptionTimeout) { [pipeline, menuBar] in
+                let outcome = try await AsyncTimeout.run(seconds: Self.transcriptionTimeout) { [pipeline, menuBar] in
                     try await pipeline.process(
                         samples: samples,
                         language: language,
@@ -270,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 utterance.settled(id)
                 Log.error("transcribe failed (id=\(id)): \(error)", "app")
-                menuBar.update(.error(error is TimeoutError
+                menuBar.update(.error(error is AsyncTimeout.TimeoutError
                     ? "Transcription timed out"
                     : error.localizedDescription))
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -309,26 +309,4 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lostReleaseTimer = timer
     }
 
-    private struct TimeoutError: Error {}
-
-    /// Race `body` against a deadline. Cancelling the group ABANDONS (does not
-    /// abort) an in-flight Core ML inference — a genuinely wedged call still
-    /// occupies its engine actor and later utterances queue behind it — but the
-    /// UI recovers to .error → idle instead of spinning forever.
-    private static func withTimeout<T: Sendable>(
-        seconds: TimeInterval,
-        _ body: @escaping @Sendable () async throws -> T
-    ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await body() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw TimeoutError()
-            }
-            // Whichever finishes first wins: the outcome, or the timeout throw.
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
-    }
 }
