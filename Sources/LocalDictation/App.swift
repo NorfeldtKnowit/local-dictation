@@ -120,7 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             do {
                 let t0 = Date()
-                let text = try await transcriber.transcribe(samples: samples)
+                // language: nil = auto-detect. Stage 2 keeps the app on the
+                // Whisper-only path; routing to Parakeet is wired in a later stage.
+                let text = try await transcriber.transcribe(samples: samples, language: nil)
                 let dt = Date().timeIntervalSince(t0)
                 Log.info("transcribe ok in \(String(format: "%.2f", dt))s, \(text.count) chars: \(text.prefix(120))", "app")
                 if !text.isEmpty {

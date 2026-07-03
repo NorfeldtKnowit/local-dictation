@@ -3,7 +3,14 @@ import WhisperKit
 
 /// Wraps WhisperKit. The model is loaded lazily on the first transcription
 /// so app launch stays fast; the ~600 MB download happens on first use.
-actor Transcriber {
+actor Transcriber: TranscriptionEngine {
+    /// Accuracy / broad-language backend. `nonisolated` so routing and menu code
+    /// can branch on it without an `await` hop.
+    nonisolated let kind = EngineKind.whisper
+
+    /// Warmed once the pipe is loaded; mirrors `ParakeetEngine`'s manager-nil check.
+    var isWarmedUp: Bool { pipe != nil }
+
     /// Whisper-large-v3-turbo (Sep 2024 weights), full precision, ~1.5 GB.
     /// Same turbo decoder (fast) as the old 632 MB default but WITHOUT the
     /// aggressive quantization that was hurting accuracy on Danish — the
@@ -27,17 +34,28 @@ actor Transcriber {
     }
 
     /// Transcribes a Float32 16 kHz mono buffer and returns plain text.
-    func transcribe(samples: [Float]) async throws -> String {
+    /// - Parameter language: ISO code ("da") to pin, or nil to auto-detect.
+    func transcribe(samples: [Float], language: String?) async throws -> String {
         guard !samples.isEmpty else {
             Log.warn("transcribe called with 0 samples", "whisper")
             return ""
         }
         let pipe = try await loadedPipe()
         let audioSeconds = Double(samples.count) / 16_000.0
-        Log.info("transcribe start: \(samples.count) samples (\(String(format: "%.2f", audioSeconds))s audio)", "whisper")
+        Log.info("transcribe start: \(samples.count) samples (\(String(format: "%.2f", audioSeconds))s audio, language=\(language ?? "auto"))", "whisper")
         let t0 = Date()
+        // Argument order MUST follow DecodingOptions' declaration order
+        // (Configurations.swift:155): language, then detectLanguage, then
+        // chunkingStrategy. The anti-hallucination thresholds
+        // (compressionRatio 2.4 / logProb -1.0 / noSpeech 0.6) are already the
+        // library defaults, so we deliberately do NOT restate them here.
+        let opts = DecodingOptions(
+            language: language,
+            detectLanguage: language == nil,
+            chunkingStrategy: .vad
+        )
         do {
-            let results = try await pipe.transcribe(audioArray: samples)
+            let results = try await pipe.transcribe(audioArray: samples, decodeOptions: opts)
             let dt = Date().timeIntervalSince(t0)
             let rtf = dt / max(audioSeconds, 0.001)
             Log.info("transcribe done in \(String(format: "%.2f", dt))s (rtf=\(String(format: "%.2f", rtf))), \(results.count) result(s)", "whisper")
