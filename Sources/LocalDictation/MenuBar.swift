@@ -1,5 +1,4 @@
 import AppKit
-import FluidAudio   // Language.allCases — the 28 Parakeet codes for the submenu
 
 final class MenuBar {
     enum State {
@@ -125,7 +124,10 @@ final class MenuBar {
         languageMenu.addItem(auto)
         languageMenu.addItem(.separator())
 
-        for code in Self.displaySorted(Language.allCases.map(\.rawValue)) {
+        // EngineRouter.parakeetLanguages is the routing source of truth (derived
+        // from FluidAudio's Language enum); building the submenu from it keeps
+        // the menu and the router incapable of drifting apart.
+        for code in Self.displaySorted(Array(EngineRouter.parakeetLanguages)) {
             languageMenu.addItem(languageItem(code: code))
         }
 

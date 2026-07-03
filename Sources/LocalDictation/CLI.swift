@@ -187,8 +187,8 @@ enum CLIRunner {
         let exitCode: Int32
         var dropReason: String?
         switch outcome.gate {
-        case .tooShort: dropReason = "tooShort"; exitCode = 3
-        case .silence:  dropReason = "silence";  exitCode = 3
+        case .tooShort, .silence:
+            dropReason = outcome.gate.rawValue; exitCode = 3
         case .pass, .vadUnavailable:
             if outcome.filtered { dropReason = "hallucination"; exitCode = 3 }
             else { exitCode = 0 }
@@ -205,7 +205,7 @@ enum CLIRunner {
         if let dropReason {
             stderr("dropped: \(dropReason)")
         }
-        stderr("cli done: engine=\(outcome.engine?.rawValue ?? "none") gate=\(gateName(outcome.gate)) "
+        stderr("cli done: engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate.rawValue) "
              + "filtered=\(outcome.filtered) latencyMs=\(Int(outcome.inferenceSeconds * 1000)) exit=\(exitCode)")
         return exitCode
     }
@@ -227,7 +227,7 @@ enum CLIRunner {
             text: outcome.text,
             engine: outcome.engine?.rawValue,
             language: language,
-            gate: gateName(outcome.gate),
+            gate: outcome.gate.rawValue,
             filtered: outcome.filtered,
             latencyMs: Int(outcome.inferenceSeconds * 1000)
         )
@@ -237,16 +237,6 @@ enum CLIRunner {
             return "{}"
         }
         return s
-    }
-
-    /// `GateDecision` has no rawValue; map it to the stable string CI greps for.
-    private static func gateName(_ decision: GateDecision) -> String {
-        switch decision {
-        case .pass:           return "pass"
-        case .tooShort:       return "tooShort"
-        case .silence:        return "silence"
-        case .vadUnavailable: return "vadUnavailable"
-        }
     }
 
     private static func stderr(_ line: String) {

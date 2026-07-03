@@ -6,7 +6,11 @@ import FluidAudio
 /// - `tooShort`: raw buffer below the accidental-tap floor; drop, no model touched.
 /// - `silence`: VAD ran but found too little speech; drop (kills Whisper silence ghosts).
 /// - `vadUnavailable`: VAD model absent/failed; fail OPEN and transcribe the raw buffer.
-enum GateDecision: Equatable, Sendable { case pass, tooShort, silence, vadUnavailable }
+///
+/// String-backed so the raw value IS the stable name the CLI emits in its JSON
+/// and stderr summaries (and that `scripts/test-cli.sh` greps for) — one source
+/// of truth, no separate name-mapping to drift.
+enum GateDecision: String, Equatable, Sendable { case pass, tooShort, silence, vadUnavailable }
 
 /// Pure, model-free gate logic. Kept separate from `SpeechGate` (the actor that
 /// owns the VAD model) precisely so this decision + trim math is unit-testable
