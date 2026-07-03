@@ -56,6 +56,11 @@ actor DictationPipeline {
     ///     per-engine language hint.
     ///   - accuracyMode: force Whisper for every language.
     ///   - forcedEngine: CLI `--engine` override that bypasses the router.
+    ///   - bypassGate: CLI `--no-vad-gate` — skip gate layers 1+2 and transcribe
+    ///     the raw buffer (treated as `.vadUnavailable`, the same fail-open path).
+    ///     Used by raw-ASR regression tests; defaults false so the GUI is unaffected.
+    ///   - bypassFilter: CLI `--no-hallucination-filter` — skip layer 3 and return
+    ///     the raw ASR text. Defaults false so the GUI is unaffected.
     ///   - onColdLoad: fired (once, before the blocking warm-up) when the routed
     ///     engine isn't warm yet, so the GUI can show "Loading … model (first
     ///     use)…". Never fired for an already-warm engine.
@@ -63,11 +68,16 @@ actor DictationPipeline {
                  language: String,
                  accuracyMode: Bool,
                  forcedEngine: EngineKind? = nil,
+                 bypassGate: Bool = false,
+                 bypassFilter: Bool = false,
                  onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> Outcome {
         // Layers 1+2 (duration + VAD). Only `.pass` (trimmed) or `.vadUnavailable`
         // (raw, fail-open) proceed to ASR; `.tooShort` / `.silence` short-circuit
-        // with empty text and no model ever touched.
-        let gated = await gate.evaluate(samples)
+        // with empty text and no model ever touched. `--no-vad-gate` skips this
+        // entirely by synthesising the fail-open decision on the raw buffer.
+        let gated = bypassGate
+            ? SpeechGate.Outcome(decision: .vadUnavailable, audio: samples)
+            : await gate.evaluate(samples)
         guard gated.decision == .pass || gated.decision == .vadUnavailable else {
             return Outcome(text: "", engine: .parakeet, gate: gated.decision,
                            filtered: false, inferenceSeconds: 0)
@@ -89,8 +99,9 @@ actor DictationPipeline {
         let raw = try await engine.transcribe(samples: gated.audio, language: hint)
         let inference = Date().timeIntervalSince(t0)
 
-        // Layer 3: post-ASR hallucination filter (whole-output blocklist + loop guard).
-        let cleaned = HallucinationFilter.clean(raw)
+        // Layer 3: post-ASR hallucination filter (whole-output blocklist + loop
+        // guard). `--no-hallucination-filter` returns the raw ASR text untouched.
+        let cleaned = bypassFilter ? raw : HallucinationFilter.clean(raw)
         return Outcome(text: cleaned, engine: kind, gate: gated.decision,
                        filtered: cleaned.isEmpty && !raw.isEmpty,
                        inferenceSeconds: inference)

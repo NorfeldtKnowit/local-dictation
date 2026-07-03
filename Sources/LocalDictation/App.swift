@@ -2,8 +2,28 @@ import AppKit
 
 @main
 struct LocalDictationMain {
-    static func main() {
+    static func main() async {
         Log.installCrashHandlers()
+        // Parse the CLI grammar BEFORE any AppKit / NSApplication state exists, so
+        // the headless `--transcribe-file` path never creates a status item, hotkey
+        // tap, or requests TCC permissions. `parse` returns nil when there are no
+        // CLI arguments (the LaunchAgent launches us with none) → run the GUI.
+        guard let parsed = CLIArguments.parse(CommandLine.arguments) else {
+            runApp()
+            return
+        }
+        switch parsed {
+        case .success(let cli):
+            exit(await CLIRunner.run(cli))
+        case .failure(let error):
+            FileHandle.standardError.write(Data((error.message + "\n").utf8))
+            exit(1)
+        }
+    }
+
+    /// Today's menu-bar launch path, verbatim: status item, hotkey, permissions,
+    /// model warm-up. Reached only when no CLI arguments are present.
+    private static func runApp() {
         Log.info("=== local-dictation launching ===")
         Log.info("log file: \(Log.logFilePath)")
         Log.info("pid: \(ProcessInfo.processInfo.processIdentifier), arch: \(machineArch()), macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)")
