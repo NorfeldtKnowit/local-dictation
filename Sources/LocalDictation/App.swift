@@ -68,6 +68,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// All recorder/menu side effects hang off the Actions it returns.
     private var utterance = UtteranceStateMachine()
 
+    /// Reorders overlapping utterances' outcomes into strict utterance-ID order
+    /// and keeps consecutive pastes >= 300 ms apart, so a slow utterance can't
+    /// paste after a faster later one and two pastes can't interleave with
+    /// TextInjector's 200 ms pasteboard save/restore window. EVERY allocated
+    /// utterance ID must be completed (empty text for gated/error/never-captured
+    /// outcomes) or the queue stalls behind the missing ID.
+    private lazy var pasteSequencer = PasteSequencer(
+        schedule: { delay, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        },
+        paste: { TextInjector.paste($0) }
+    )
+
     /// Set when Parakeet fails to warm at launch. Equivalent to Accuracy Mode:
     /// every utterance routes to Whisper, which is a safe universal superset of
     /// Parakeet's languages. Never the reverse — a Whisper failure must not
@@ -233,6 +246,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // there is nothing to transcribe and nothing in flight.
             if case .stopCaptureAndProcess(let failedID) = utterance.end() {
                 utterance.settled(failedID)
+                // The ID was allocated but will never transcribe: advance the
+                // paste sequence past it or later utterances would stall.
+                pasteSequencer.complete(id: failedID, text: "")
             }
             menuBar.update(.error(error.localizedDescription))
         }
@@ -289,12 +305,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 utterance.settled(id)
                 Log.info("utterance \(id): engine=\(outcome.engine.rawValue) gate=\(outcome.gate) filtered=\(outcome.filtered) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
-                if !outcome.text.isEmpty {
-                    TextInjector.paste(outcome.text)
-                }
+                // Never paste directly: the sequencer restores spoken order for
+                // overlapping utterances (an empty text still advances the queue).
+                pasteSequencer.complete(id: id, text: outcome.text)
                 refreshMenuState()
             } catch {
                 utterance.settled(id)
+                // Errored utterances paste nothing but must advance the sequence.
+                pasteSequencer.complete(id: id, text: "")
                 Log.error("transcribe failed (id=\(id)): \(error)", "app")
                 menuBar.update(.error(error is AsyncTimeout.TimeoutError
                     ? "Transcription timed out"
