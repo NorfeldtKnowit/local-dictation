@@ -78,6 +78,22 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
         session.addInput(input)
 
         let output = AVCaptureAudioDataOutput()
+        // Force the capture output to deliver Float32 PCM regardless of what the
+        // device negotiates. Bluetooth HFP headsets (e.g. Bose NC 700) can flip
+        // their codec mid-session and start delivering Int16 (commonFormat=3); on
+        // that same-rate Int16 path AVAudioConverter converts the first buffer
+        // then returns status=.error on every subsequent one, yielding ~320
+        // samples and an empty transcript. Pinning the float format here keeps us
+        // on the proven Float32 converter path (sample rate / channels stay
+        // device-native, so the 48 kHz→16 kHz resample for the built-in mic still
+        // works). See the Bluetooth HFP gotchas in CLAUDE.md.
+        output.audioSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
         output.setSampleBufferDelegate(self, queue: captureQueue)
         guard session.canAddOutput(output) else {
             session.commitConfiguration()
