@@ -1,0 +1,98 @@
+import Foundation
+
+/// The single place where gate → route → transcribe → filter happens, shared by
+/// both front-ends (the GUI menu-bar dictation and the CLI `--transcribe-file`
+/// mode). Keeping this as the one reuse point is deliberate: it is the only way
+/// to guarantee the two entry paths can't drift in behaviour (routing, gating,
+/// hallucination filtering all stay identical).
+///
+/// An actor because it holds the two engines (themselves actors) plus the gate,
+/// and because a fresh utterance may be dispatched while a previous one is still
+/// transcribing. The engines serialise their own model state via their actor
+/// isolation and each utterance gets a fresh decoder state, so overlapping calls
+/// don't bleed; this actor just orchestrates.
+actor DictationPipeline {
+    /// The result of running one utterance through the whole pipeline.
+    struct Outcome: Sendable {
+        /// The text to paste. Empty when the utterance was gated out OR when the
+        /// transcript was suppressed by the hallucination filter (distinguish the
+        /// two via `gate` and `filtered`).
+        let text: String
+        /// Which engine ran. For a gated-out utterance (no ASR) this is a
+        /// placeholder (`.parakeet`) — inspect `gate` to know it never ran.
+        let engine: EngineKind
+        /// Why the gate passed or dropped this utterance.
+        let gate: GateDecision
+        /// True iff ASR produced non-empty text that the hallucination filter
+        /// then dropped (so callers can log a suppressed ghost vs. real silence).
+        let filtered: Bool
+        /// Wall-clock seconds spent inside `engine.transcribe` (0 when gated out).
+        let inferenceSeconds: Double
+    }
+
+    private let parakeet: any TranscriptionEngine   // ParakeetEngine
+    private let whisper: any TranscriptionEngine    // Transcriber
+    private let gate: GateProviding                 // SpeechGate (or a test fake)
+
+    init(parakeet: any TranscriptionEngine, whisper: any TranscriptionEngine, gate: GateProviding) {
+        self.parakeet = parakeet
+        self.whisper = whisper
+        self.gate = gate
+    }
+
+    /// Warm only the launch-time defaults: the VAD gate and Parakeet (both load
+    /// in seconds). Whisper stays lazy — it cold-loads for 3-4 min and resides
+    /// at ~1.5 GB, so that cost is paid only if/when the user actually routes to
+    /// it (Accuracy Mode or a language outside Parakeet's set).
+    func warmUpDefaults() async throws {
+        await gate.warmUp()          // fail-open; never throws
+        try await parakeet.warmUp()
+    }
+
+    /// Run one utterance end-to-end.
+    /// - Parameters:
+    ///   - samples: 16 kHz mono Float32 capture buffer.
+    ///   - language: "auto" (no pin) or an ISO code; drives both routing and the
+    ///     per-engine language hint.
+    ///   - accuracyMode: force Whisper for every language.
+    ///   - forcedEngine: CLI `--engine` override that bypasses the router.
+    ///   - onColdLoad: fired (once, before the blocking warm-up) when the routed
+    ///     engine isn't warm yet, so the GUI can show "Loading … model (first
+    ///     use)…". Never fired for an already-warm engine.
+    func process(samples: [Float],
+                 language: String,
+                 accuracyMode: Bool,
+                 forcedEngine: EngineKind? = nil,
+                 onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> Outcome {
+        // Layers 1+2 (duration + VAD). Only `.pass` (trimmed) or `.vadUnavailable`
+        // (raw, fail-open) proceed to ASR; `.tooShort` / `.silence` short-circuit
+        // with empty text and no model ever touched.
+        let gated = await gate.evaluate(samples)
+        guard gated.decision == .pass || gated.decision == .vadUnavailable else {
+            return Outcome(text: "", engine: .parakeet, gate: gated.decision,
+                           filtered: false, inferenceSeconds: 0)
+        }
+
+        // Route, unless the CLI pinned a specific engine.
+        let kind = forcedEngine ?? EngineRouter.route(language: language, accuracyMode: accuracyMode)
+        let engine = (kind == .parakeet) ? parakeet : whisper
+
+        // Surface the cold-load BEFORE the (possibly minutes-long) warm-up so the
+        // UI reflects it immediately; warmUp() itself is idempotent, so calling it
+        // when already warm is a cheap no-op.
+        if await !engine.isWarmedUp { onColdLoad?(kind) }
+        try await engine.warmUp()
+
+        // "auto" is the app-level sentinel for "no pin"; engines take nil for auto.
+        let hint = (language == "auto") ? nil : language
+        let t0 = Date()
+        let raw = try await engine.transcribe(samples: gated.audio, language: hint)
+        let inference = Date().timeIntervalSince(t0)
+
+        // Layer 3: post-ASR hallucination filter (whole-output blocklist + loop guard).
+        let cleaned = HallucinationFilter.clean(raw)
+        return Outcome(text: cleaned, engine: kind, gate: gated.decision,
+                       filtered: cleaned.isEmpty && !raw.isEmpty,
+                       inferenceSeconds: inference)
+    }
+}
