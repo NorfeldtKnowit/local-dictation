@@ -91,8 +91,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// disables, but a release can also vanish in ways the tap never sees
     /// (secure-input focus steals, dropped flagsChanged). 120 s is longer than
     /// any sane push-to-talk hold yet bounds how long the mic can stay hot.
+    /// When it fires, the physical key state decides (see `LostReleaseWatchdog`):
+    /// a genuinely still-held Right Option re-arms instead of truncating.
     private static let lostReleaseTimeout: TimeInterval = 120
     private var lostReleaseTimer: Timer?
+
+    /// Physical "is Right Option down right now?" probe, injected into the
+    /// watchdog decision. `CGEventSource.keyState` reads the session's HID
+    /// state for any virtual keycode, modifiers included; 61 is Right Option,
+    /// the same keycode `HotkeyMonitor`'s tap watches.
+    private let hotkeyStillDown: () -> Bool = {
+        CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(61))
+    }
 
     /// Hang guard: one pipeline.process call may not exceed this, so a wedged
     /// Core ML graph / model download can't pin the menu on "Transcribing…" forever.
@@ -339,14 +349,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Belt-and-braces for a swallowed hotkey release the tap never saw. Fires
     /// only if the SAME utterance (by monotonic ID) is still capturing after the
-    /// timeout — a normal end/begin cycle in between makes it a no-op.
+    /// timeout — a normal end/begin cycle in between makes it a no-op. A key
+    /// that is genuinely still held re-arms instead of truncating the dictation.
     private func scheduleLostReleaseWatchdog(id: UInt64) {
         lostReleaseTimer?.invalidate()
         let timer = Timer(timeInterval: Self.lostReleaseTimeout, repeats: false) { [weak self] _ in
             guard let self = self else { return }
-            guard self.utterance.isRecording, self.utterance.recordingID == id else { return }
-            Log.warn("lost-release watchdog fired (id=\(id)) — forcing endRecording", "app")
-            self.endRecording()
+            switch LostReleaseWatchdog.decide(isRecording: self.utterance.isRecording,
+                                              recordingID: self.utterance.recordingID,
+                                              firedID: id,
+                                              keyStillDown: self.hotkeyStillDown) {
+            case .ignore:
+                return
+            case .rearm:
+                Log.info("lost-release watchdog: Right Option still physically held (id=\(id)) — re-arming", "app")
+                self.scheduleLostReleaseWatchdog(id: id)
+            case .endRecording:
+                Log.warn("lost-release watchdog fired (id=\(id)) — key is up, forcing endRecording", "app")
+                self.endRecording()
+            }
         }
         // .common so it fires even while the status-item menu is open.
         RunLoop.main.add(timer, forMode: .common)
