@@ -251,7 +251,7 @@ check rather than default CI.
 | `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode |
 | `Sources/LocalDictation/HotkeyMonitor.swift` | `CGEventTap` watching Right Option; `isDown` delegates to `HotkeyStateMachine` |
 | `Sources/LocalDictation/HotkeyStateMachine.swift` | Pure press/release/tap-disabled state machine (unit tested) |
-| `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 (byte-for-byte frozen) |
+| `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 (frozen since the Float32 output pin `1ee728e` — do not modify) |
 | `Sources/LocalDictation/Transcriber.swift` | WhisperKit wrapper; conforms to `TranscriptionEngine` |
 | `Sources/LocalDictation/ParakeetEngine.swift` | FluidAudio Parakeet TDT v3 engine (low-latency default) |
 | `Sources/LocalDictation/TranscriptionEngine.swift` | `EngineKind` + the shared engine protocol |

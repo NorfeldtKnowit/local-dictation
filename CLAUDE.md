@@ -22,8 +22,10 @@ transcribe → inject:
 - `HotkeyMonitor.swift` — `CGEvent` tap watching Right Option (keycode 61);
   `isDown` bookkeeping delegates to `HotkeyStateMachine`.
 - `HotkeyStateMachine.swift` — pure press/release/tap-disabled state machine.
-- `AudioRecorder.swift` — mic capture via **AVCaptureSession**, byte-for-byte
-  frozen (see gotcha below).
+- `AudioRecorder.swift` — mic capture via **AVCaptureSession**, frozen: do
+  not modify (see gotcha below). The freeze baseline is the Float32 output
+  pin (`1ee728e`, a pre-engine-v2 Bluetooth-HFP fix); the engine-v2 work
+  itself added nothing on top of it.
 - `SpeechGate.swift` / `SpeechGateLogic.swift` — pre-ASR VAD guard: actor
   wrapper (degrades gracefully if Silero is unavailable) + pure decision/trim
   logic.
@@ -198,6 +200,18 @@ app actually sets are `language:`, `detectLanguage:`, and `chunkingStrategy:
 the checked-out source before compiling, not from memory or from an older
 snippet.
 
+### Timeouts around Core ML: task groups can't bail out
+
+Do not implement the transcription hang guard with `withThrowingTaskGroup`:
+structured concurrency must cancel **and await** every child before the group
+can rethrow, and a wedged Core ML inference ignores cooperative cancellation —
+so a "timeout" child that throws at the deadline still blocks until the
+inference actually returns (i.e. never, for a true hang). That leaves the menu
+pinned on "Transcribing…" and the utterance forever in flight — exactly the
+failure the guard exists to bound. `AsyncTimeout.run` exists for this: an
+unstructured continuation-based race that abandons the wedged body and fires
+at the deadline (regression-tested in `AsyncTimeoutTests`).
+
 ## Testing
 
 - **Executable targets are unit-testable directly** — SPM has supported test
@@ -211,8 +225,10 @@ snippet.
 - `scripts/test-cli.sh` is the model-touching e2e layer: it drives the real
   release binary's `--transcribe-file` mode against `scripts/make-fixtures.sh`
   fixtures (Danish → Parakeet, English forced through `--engine whisper`,
-  digital silence → exit 3) and needs Parakeet v3 + Whisper large-v3 already
-  cached locally. Treat it as manual/nightly, not part of `swift test`.
+  digital silence → exit 3 **and** `dropped: silence`/`gate=silence` on
+  stderr — exit 3 alone is ambiguous with a hallucination-filter drop after a
+  VAD fail-open) and needs Parakeet v3 + Whisper large-v3 already cached
+  locally. Treat it as manual/nightly, not part of `swift test`.
 - CLI mode (`--transcribe-file <path> [--engine …] [--language …] [--accuracy]
   [--no-vad-gate] [--no-hallucination-filter] [--json]`) constructs no
   `AudioRecorder`/`HotkeyMonitor`/`MenuBar`/`NSApp` — it requests zero TCC
