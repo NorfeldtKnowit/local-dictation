@@ -61,10 +61,10 @@ actor Transcriber: TranscriptionEngine {
 
     /// Transcribes a Float32 16 kHz mono buffer and returns plain text.
     /// - Parameter language: ISO code ("da") to pin, or nil to auto-detect.
-    func transcribe(samples: [Float], language: String?) async throws -> String {
+    func transcribe(samples: [Float], language: String?) async throws -> EngineResult {
         guard !samples.isEmpty else {
             Log.warn("transcribe called with 0 samples", "whisper")
-            return ""
+            return EngineResult(text: "", confidence: nil)
         }
         let pipe = try await loadedPipe()
         let audioSeconds = Double(samples.count) / 16_000.0
@@ -85,8 +85,11 @@ actor Transcriber: TranscriptionEngine {
             let dt = Date().timeIntervalSince(t0)
             let rtf = dt / max(audioSeconds, 0.001)
             Log.info("transcribe done in \(String(format: "%.2f", dt))s (rtf=\(String(format: "%.2f", rtf))), \(results.count) result(s)", "whisper")
-            return results.map(\.text).joined(separator: " ")
+            // Whisper has no scalar comparable to Parakeet's token confidence;
+            // nil is correct — the pipeline never rescues *from* Whisper.
+            let text = results.map(\.text).joined(separator: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            return EngineResult(text: text, confidence: nil)
         } catch {
             Log.error("pipe.transcribe threw: \(error)", "whisper")
             throw error

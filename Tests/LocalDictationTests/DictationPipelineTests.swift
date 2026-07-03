@@ -8,6 +8,8 @@ import XCTest
 private actor FakeEngine: TranscriptionEngine {
     nonisolated let kind: EngineKind
     private let output: String
+    private let confidence: Double?
+    private let transcribeError: Error?
     private var warmed: Bool
 
     private(set) var warmUpCount = 0
@@ -15,10 +17,13 @@ private actor FakeEngine: TranscriptionEngine {
     private(set) var lastLanguage: String?
     private(set) var lastSampleCount = 0
 
-    init(kind: EngineKind, output: String, startWarm: Bool = false) {
+    init(kind: EngineKind, output: String, startWarm: Bool = false,
+         confidence: Double? = nil, transcribeError: Error? = nil) {
         self.kind = kind
         self.output = output
         self.warmed = startWarm
+        self.confidence = confidence
+        self.transcribeError = transcribeError
     }
 
     var isWarmedUp: Bool { warmed }
@@ -28,11 +33,12 @@ private actor FakeEngine: TranscriptionEngine {
         warmed = true
     }
 
-    func transcribe(samples: [Float], language: String?) async throws -> String {
+    func transcribe(samples: [Float], language: String?) async throws -> EngineResult {
         transcribeCount += 1
         lastLanguage = language
         lastSampleCount = samples.count
-        return output
+        if let transcribeError { throw transcribeError }
+        return EngineResult(text: output, confidence: confidence)
     }
 }
 
@@ -244,5 +250,108 @@ final class DictationPipelineTests: XCTestCase {
         XCTAssertEqual(out.text, "parakeet text")
         let pCount = await parakeet.transcribeCount
         XCTAssertEqual(pCount, 1)
+    }
+
+    // MARK: - Confidence rescue
+
+    func testLowConfidenceRescuesToWhisper() async throws {
+        // Parakeet below the rescue threshold (real-world case: Danish decoded
+        // as English at conf 0.59) must be re-run through Whisper, whose text
+        // and identity the outcome then carries, with the language hint intact.
+        let parakeet = FakeEngine(kind: .parakeet, output: "wrong english", startWarm: true, confidence: 0.59)
+        let whisper = FakeEngine(kind: .whisper, output: "rigtig dansk", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false)
+
+        XCTAssertEqual(out.text, "rigtig dansk")
+        XCTAssertEqual(out.engine, .whisper)
+        XCTAssertTrue(out.rescued)
+        let wLang = await whisper.lastLanguage
+        XCTAssertEqual(wLang, "da")
+        let wCount = await whisper.transcribeCount
+        XCTAssertEqual(wCount, 1)
+    }
+
+    func testHighConfidenceStaysOnParakeet() async throws {
+        let parakeet = FakeEngine(kind: .parakeet, output: "fin dansk", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "should not run", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false)
+
+        XCTAssertEqual(out.text, "fin dansk")
+        XCTAssertEqual(out.engine, .parakeet)
+        XCTAssertFalse(out.rescued)
+        let wCount = await whisper.transcribeCount
+        XCTAssertEqual(wCount, 0)
+    }
+
+    func testRescueWarmsColdWhisperAndFiresColdLoadCallback() async throws {
+        let parakeet = FakeEngine(kind: .parakeet, output: "iffy", startWarm: true, confidence: 0.10)
+        let whisper = FakeEngine(kind: .whisper, output: "rescued", startWarm: false)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+        let recorder = ColdLoadRecorder()
+
+        let out = try await pipeline.process(samples: passingAudio, language: "auto", accuracyMode: false,
+                                             onColdLoad: { recorder.record($0) })
+
+        XCTAssertEqual(out.text, "rescued")
+        XCTAssertTrue(out.rescued)
+        XCTAssertEqual(recorder.kinds, [.whisper])
+        let wWarm = await whisper.warmUpCount
+        XCTAssertGreaterThanOrEqual(wWarm, 1)
+    }
+
+    func testRescueFailureKeepsParakeetText() async throws {
+        // A dubious transcript beats a lost utterance: if the Whisper re-run
+        // throws, the outcome falls back to Parakeet's text, un-rescued.
+        struct Boom: Error {}
+        let parakeet = FakeEngine(kind: .parakeet, output: "dubious but present", startWarm: true, confidence: 0.30)
+        let whisper = FakeEngine(kind: .whisper, output: "never returned", startWarm: true, transcribeError: Boom())
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false)
+
+        XCTAssertEqual(out.text, "dubious but present")
+        XCTAssertEqual(out.engine, .parakeet)
+        XCTAssertFalse(out.rescued)
+    }
+
+    func testForcedEngineNeverRescues() async throws {
+        // An explicit --engine parakeet is a user decision; low confidence must
+        // not silently substitute Whisper output.
+        let parakeet = FakeEngine(kind: .parakeet, output: "forced parakeet", startWarm: true, confidence: 0.10)
+        let whisper = FakeEngine(kind: .whisper, output: "should not run", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false,
+                                             forcedEngine: .parakeet)
+
+        XCTAssertEqual(out.text, "forced parakeet")
+        XCTAssertFalse(out.rescued)
+        let wCount = await whisper.transcribeCount
+        XCTAssertEqual(wCount, 0)
+    }
+
+    func testNilConfidenceNeverRescues() async throws {
+        // Engines that report no confidence (Whisper, or a future engine) must
+        // never trigger the rescue path by accident.
+        let parakeet = FakeEngine(kind: .parakeet, output: "no confidence signal", startWarm: true, confidence: nil)
+        let whisper = FakeEngine(kind: .whisper, output: "should not run", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "da", accuracyMode: false)
+
+        XCTAssertEqual(out.text, "no confidence signal")
+        XCTAssertFalse(out.rescued)
+        let wCount = await whisper.transcribeCount
+        XCTAssertEqual(wCount, 0)
     }
 }

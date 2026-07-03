@@ -67,7 +67,7 @@ actor ParakeetEngine: TranscriptionEngine {
     /// - Parameter language: ISO code ("da") mapped to a `Language` script-filter
     ///   hint (v3-only; skips top-K tokens whose script doesn't match), or nil to
     ///   let the model self-detect among its supported languages.
-    func transcribe(samples: [Float], language: String?) async throws -> String {
+    func transcribe(samples: [Float], language: String?) async throws -> EngineResult {
         guard let manager else { throw EngineError.notReady }
         // Fresh decoder state per utterance: no token/context bleed from the
         // previous dictation. (The `inout` API keeps the door open for a future
@@ -80,6 +80,7 @@ actor ParakeetEngine: TranscriptionEngine {
         let hint = language.flatMap(Language.init(rawValue:))
         let result = try await manager.transcribe(samples, decoderState: &state, language: hint)
         Log.info("parakeet ok rtfx=\(String(format: "%.1f", result.rtfx)) conf=\(String(format: "%.2f", result.confidence))", "parakeet")
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return EngineResult(text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+                            confidence: Double(result.confidence))
     }
 }

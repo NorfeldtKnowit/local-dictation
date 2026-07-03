@@ -165,6 +165,38 @@ Parakeet launch failure, which flips a `forceWhisper` override (equivalent to
 Accuracy Mode): Whisper is a safe universal superset, so that direction is
 always correct.
 
+### Confidence rescue: Parakeet cannot be forced to a language
+
+Parakeet v3's `language:` hint is only a script filter. Danish and English are
+both Latin script, so a pinned `da` cannot stop the model from decoding Danish
+speech as English gibberish; the only tell is low confidence. Measured on this
+machine: clean same-language audio scores 0.88-0.97, and a real Danish
+utterance that Parakeet decoded as English scored 0.59. `DictationPipeline`
+therefore rescues any auto-routed Parakeet result whose confidence is below
+0.80 (`DictationPipeline.defaultRescueConfidence`) by re-running the audio
+through Whisper, where a pinned language IS forced
+(`DecodingOptions.language`). Rules: a forced `--engine` never rescues (the
+explicit choice wins), engines reporting nil confidence never trigger it, and
+a failed rescue keeps Parakeet's text (a dubious transcript beats a lost
+utterance). Outcomes carry `rescued` in the log line and CLI JSON. The first
+rescue after launch pays Whisper's warm load (about 5-8 s, menu shows the
+loading state); Whisper then stays resident, so later rescues cost only its
+inference (about 1-2 s).
+
+### Debugging bad transcripts: the last utterance is on disk
+
+Synthesized `say` fixtures proved misleading for real-speech quality, so the
+GUI saves every capture (single file, overwritten per utterance, local only)
+to `~/Library/Caches/local-dictation/last-utterance.wav`. After a bad
+dictation, replay the actual audio through either engine:
+
+```bash
+.build/release/local-dictation --transcribe-file \
+  ~/Library/Caches/local-dictation/last-utterance.wav --language da --json
+```
+
+Opt out by setting `LOCAL_DICTATION_SAVE_AUDIO=0` in the LaunchAgent plist.
+
 ### FluidAudio's `Language` enum has no Norwegian
 
 `Language.allCases` (imported from FluidAudio) is exactly 28 cases across

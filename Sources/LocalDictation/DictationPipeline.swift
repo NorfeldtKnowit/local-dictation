@@ -28,16 +28,32 @@ actor DictationPipeline {
         let filtered: Bool
         /// Wall-clock seconds spent inside `engine.transcribe` (0 when gated out).
         let inferenceSeconds: Double
+        /// True iff Parakeet's transcript was discarded for a Whisper re-run
+        /// because its confidence fell below the rescue threshold (`engine` is
+        /// then `.whisper` — the engine whose text was actually used).
+        var rescued: Bool = false
     }
+
+    /// Parakeet confidence at/above which its transcript is trusted as-is.
+    /// Below it, the utterance is re-run through Whisper (which CAN be forced
+    /// to a language, unlike Parakeet's script-only hint). Calibration from
+    /// this machine: clean same-language audio scores 0.88-0.97; a real Danish
+    /// utterance Parakeet wrongly decoded as English scored 0.59.
+    static let defaultRescueConfidence = 0.80
 
     private let parakeet: any TranscriptionEngine   // ParakeetEngine
     private let whisper: any TranscriptionEngine    // Transcriber
     private let gate: GateProviding                 // SpeechGate (or a test fake)
+    private let rescueConfidence: Double
 
-    init(parakeet: any TranscriptionEngine, whisper: any TranscriptionEngine, gate: GateProviding) {
+    init(parakeet: any TranscriptionEngine,
+         whisper: any TranscriptionEngine,
+         gate: GateProviding,
+         rescueConfidence: Double = DictationPipeline.defaultRescueConfidence) {
         self.parakeet = parakeet
         self.whisper = whisper
         self.gate = gate
+        self.rescueConfidence = rescueConfidence
     }
 
     /// Warm only the launch-time defaults: the VAD gate and Parakeet (both load
@@ -117,14 +133,40 @@ actor DictationPipeline {
         // "auto" is the app-level sentinel for "no pin"; engines take nil for auto.
         let hint = (language == "auto") ? nil : language
         let t0 = Date()
-        let raw = try await engine.transcribe(samples: gated.audio, language: hint)
+        var result = try await engine.transcribe(samples: gated.audio, language: hint)
+        var usedKind = kind
+        var rescued = false
+
+        // Confidence rescue. Parakeet v3 cannot be *forced* to a language — its
+        // `language:` hint is only a script filter, and e.g. Danish vs English
+        // are both Latin — so when it locks onto the wrong language the only
+        // tell is low confidence. Re-run those utterances through Whisper,
+        // which honours a pinned language outright (DecodingOptions.language).
+        // Never rescues when the caller forced an engine (explicit choice wins),
+        // and a rescue failure falls back to Parakeet's text: a dubious
+        // transcript beats a lost utterance.
+        if forcedEngine == nil, kind == .parakeet,
+           let confidence = result.confidence, confidence < rescueConfidence {
+            Log.warn("parakeet confidence \(String(format: "%.2f", confidence)) < \(String(format: "%.2f", rescueConfidence)) — rescuing with whisper", "pipeline")
+            do {
+                if await !whisper.isWarmedUp { onColdLoad?(.whisper) }
+                try await whisper.warmUp()
+                result = try await whisper.transcribe(samples: gated.audio, language: hint)
+                usedKind = .whisper
+                rescued = true
+            } catch {
+                Log.error("whisper rescue failed — keeping parakeet transcript: \(error)", "pipeline")
+            }
+        }
         let inference = Date().timeIntervalSince(t0)
 
         // Layer 3: post-ASR hallucination filter (whole-output blocklist + loop
         // guard). `--no-hallucination-filter` returns the raw ASR text untouched.
+        let raw = result.text
         let cleaned = bypassFilter ? raw : HallucinationFilter.clean(raw)
-        return Outcome(text: cleaned, engine: kind, gate: gated.decision,
+        return Outcome(text: cleaned, engine: usedKind, gate: gated.decision,
                        filtered: cleaned.isEmpty && !raw.isEmpty,
-                       inferenceSeconds: inference)
+                       inferenceSeconds: inference,
+                       rescued: rescued)
     }
 }

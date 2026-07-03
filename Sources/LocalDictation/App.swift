@@ -282,8 +282,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         lostReleaseTimer = nil
         let samples = recorder.stop()
         Log.info("endRecording id=\(id) captured \(samples.count) samples (\(String(format: "%.2f", Double(samples.count) / AudioRecorder.targetSampleRate))s)", "app")
+        saveLastUtterance(samples)
         menuBar.update(.transcribing)
         transcribe(id: id, samples: samples)
+    }
+
+    /// Keep the most recent capture on disk (single file, overwritten every
+    /// utterance, never leaves the machine) so a bad transcript can be replayed
+    /// through both engines via `--transcribe-file` with the *real* audio —
+    /// synthesized fixtures proved misleading for real-speech quality. Opt out
+    /// with LOCAL_DICTATION_SAVE_AUDIO=0 in the LaunchAgent plist.
+    private func saveLastUtterance(_ samples: [Float]) {
+        guard ProcessInfo.processInfo.environment["LOCAL_DICTATION_SAVE_AUDIO"] != "0",
+              !samples.isEmpty else { return }
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("local-dictation", isDirectory: true)
+        let url = dir.appendingPathComponent("last-utterance.wav")
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                             sampleRate: AudioRecorder.targetSampleRate,
+                                             channels: 1, interleaved: false),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                frameCapacity: AVAudioFrameCount(samples.count))
+            else { return }
+            buffer.frameLength = AVAudioFrameCount(samples.count)
+            samples.withUnsafeBufferPointer { src in
+                buffer.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
+            }
+            // Overwrite-in-place isn't supported by AVAudioFile; remove first.
+            try? FileManager.default.removeItem(at: url)
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+            Log.debug("last utterance saved to \(url.path)", "app")
+        } catch {
+            Log.warn("could not save last utterance: \(error)", "app")
+        }
     }
 
     private func transcribe(id: UInt64, samples: [Float]) {
@@ -323,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 utterance.settled(id)
-                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
+                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescued) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
                 // Never paste directly: the sequencer restores spoken order for
                 // overlapping utterances (an empty text still advances the queue).
                 pasteSequencer.complete(id: id, text: outcome.text)

@@ -38,6 +38,16 @@ routed to one of the two engines:
 | Pinned, outside Parakeet's 28 | off | Whisper  | e.g. `no`, `ja`, `zh`, `ko`, `ar`       |
 | Any                            | on  | Whisper  | forces Whisper for every language      |
 
+When Parakeet reports low confidence in its own transcript (below 0.80, the
+telltale of it decoding e.g. Danish speech as English gibberish), the
+utterance is automatically re-run through Whisper with the pinned language
+forced, and Whisper's text is pasted instead. The first rescue after launch
+pays Whisper's load time (about 5-8 seconds, shown in the menu bar); later
+rescues cost only its inference. Every capture is also saved to
+`~/Library/Caches/local-dictation/last-utterance.wav` (one file, overwritten,
+never leaves the machine) so a bad transcript can be replayed through both
+engines with the real audio; set `LOCAL_DICTATION_SAVE_AUDIO=0` to disable.
+
 Parakeet's `Language` enum has **no Norwegian** (`no`/`nb`), a Nordic-user
 landmine worth knowing about. Norwegian dictation always routes to Whisper,
 whether pinned explicitly or (since it's outside the 28) picked up on Auto
