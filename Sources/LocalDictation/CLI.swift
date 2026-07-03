@@ -35,15 +35,39 @@ struct CLIArguments: Equatable {
     var json: Bool
 
     /// A malformed invocation (unknown flag, missing value, absent required file).
-    /// The entry point prints `message` to stderr and exits 1.
-    struct ParseError: Error, Equatable { let message: String }
+    /// The entry point prints `message` to stderr and exits 1 — unless
+    /// `isHelpRequest`, where `message` is the usage text (stdout, exit 0).
+    struct ParseError: Error, Equatable {
+        let message: String
+        var isHelpRequest = false
+    }
+
+    static let usage = """
+        usage: local-dictation --transcribe-file <path>
+                               [--engine auto|parakeet|whisper]
+                               [--language <iso>|auto]
+                               [--accuracy]
+                               [--no-vad-gate]
+                               [--no-hallucination-filter]
+                               [--json]
+        Without --transcribe-file the menu-bar GUI launches (any other
+        arguments, e.g. macOS-injected -psn_… tokens, are ignored).
+        """
 
     /// Parse the full process argv (including argv[0], the program path).
-    /// - Returns: `nil` when no CLI arguments are present (→ launch the GUI);
-    ///   `.success` for a valid headless run; `.failure` for a usage error.
+    /// - Returns: `nil` for a GUI launch; `.success` for a valid headless run;
+    ///   `.failure` for a usage error (or `--help`, flagged as such).
+    ///
+    /// GUI vs CLI: only `--transcribe-file` (or `--help`) opts into strict CLI
+    /// parsing. macOS can inject argv tokens into a normal app launch (legacy
+    /// `-psn_…` process serial numbers, `-NSSomething` UserDefaults arguments),
+    /// so unknown stray arguments WITHOUT `--transcribe-file` must fall through
+    /// to the GUI instead of exiting the whole app; the entry point logs them.
     static func parse(_ argv: [String]) -> Result<CLIArguments, ParseError>? {
         let args = Array(argv.dropFirst())          // drop the program path
-        if args.isEmpty { return nil }              // no flags → GUI launch
+        guard args.contains("--transcribe-file") || args.contains("--help") else {
+            return nil                              // GUI launch (stray args ignored)
+        }
 
         var file: String?
         var forcedEngine: EngineKind?
@@ -78,6 +102,8 @@ struct CLIArguments: Equatable {
                     return .failure(.init(message: "--language requires a value (ISO code or auto)"))
                 }
                 language = args[i + 1]; i += 2
+            case "--help":
+                return .failure(.init(message: Self.usage, isHelpRequest: true))
             case "--accuracy":                accuracy = true; i += 1
             case "--no-vad-gate":             vadGate = false; i += 1
             case "--no-hallucination-filter": hallucinationFilter = false; i += 1

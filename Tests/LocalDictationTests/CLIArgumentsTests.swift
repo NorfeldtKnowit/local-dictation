@@ -73,12 +73,38 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertTrue(cli.json)
     }
 
-    func testUnknownFlagRejected() {
+    func testUnknownFlagWithTranscribeFileRejected() {
+        // Once --transcribe-file opts into CLI mode, parsing is strict again.
         guard case .some(.failure) = CLIArguments.parse([
             "local-dictation", "--transcribe-file", "/tmp/a.wav", "--bogus",
         ]) else {
-            return XCTFail("expected .failure for an unknown flag")
+            return XCTFail("expected .failure for an unknown flag alongside --transcribe-file")
         }
+    }
+
+    func testPsnArgLaunchesGui() {
+        // macOS injects argv tokens into normal app launches (legacy -psn_…
+        // process serial numbers, -NSSomething UserDefaults args). Without
+        // --transcribe-file these must fall through to the GUI, not exit(1).
+        XCTAssertNil(CLIArguments.parse(["local-dictation", "-psn_0_12345"]))
+        XCTAssertNil(CLIArguments.parse([
+            "local-dictation", "-NSDocumentRevisionsDebugMode", "YES",
+        ]))
+    }
+
+    func testStrayKnownFlagWithoutTranscribeFileLaunchesGui() {
+        // Even a flag from our own grammar doesn't opt into CLI mode by itself.
+        XCTAssertNil(CLIArguments.parse(["local-dictation", "--json"]))
+    }
+
+    func testHelpReturnsUsageAsHelpRequest() {
+        guard case .some(.failure(let error)) = CLIArguments.parse([
+            "local-dictation", "--help",
+        ]) else {
+            return XCTFail("expected .failure(isHelpRequest) for --help")
+        }
+        XCTAssertTrue(error.isHelpRequest)
+        XCTAssertEqual(error.message, CLIArguments.usage)
     }
 
     func testInvalidEngineValueRejected() {
@@ -86,13 +112,6 @@ final class CLIArgumentsTests: XCTestCase {
             "local-dictation", "--transcribe-file", "/tmp/a.wav", "--engine", "banana",
         ]) else {
             return XCTFail("expected .failure for an invalid --engine value")
-        }
-    }
-
-    func testMissingTranscribeFileRejected() {
-        // CLI flags present but no required --transcribe-file → usage error, not GUI.
-        guard case .some(.failure) = CLIArguments.parse(["local-dictation", "--json"]) else {
-            return XCTFail("expected .failure when --transcribe-file is missing")
         }
     }
 

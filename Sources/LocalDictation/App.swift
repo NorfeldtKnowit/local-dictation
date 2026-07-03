@@ -7,15 +7,24 @@ struct LocalDictationMain {
         Log.installCrashHandlers()
         // Parse the CLI grammar BEFORE any AppKit / NSApplication state exists, so
         // the headless `--transcribe-file` path never creates a status item, hotkey
-        // tap, or requests TCC permissions. `parse` returns nil when there are no
-        // CLI arguments (the LaunchAgent launches us with none) → run the GUI.
+        // tap, or requests TCC permissions. `parse` returns nil for a GUI launch:
+        // either no arguments (how the LaunchAgent starts us) or stray argv tokens
+        // macOS injects into app launches (-psn_…, -NSSomething) — those must be
+        // ignored, never exit(1) the whole app.
         guard let parsed = CLIArguments.parse(CommandLine.arguments) else {
+            let stray = Array(CommandLine.arguments.dropFirst())
+            if !stray.isEmpty {
+                Log.warn("ignoring non-CLI launch arguments: \(stray)", "cli")
+            }
             runApp()
             return
         }
         switch parsed {
         case .success(let cli):
             exit(await CLIRunner.run(cli))
+        case .failure(let error) where error.isHelpRequest:
+            print(error.message)
+            exit(0)
         case .failure(let error):
             FileHandle.standardError.write(Data((error.message + "\n").utf8))
             exit(1)
