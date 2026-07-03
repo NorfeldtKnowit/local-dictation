@@ -15,9 +15,41 @@ Whisper model so it works in any app and never sends audio off the machine.
 - AVCaptureSession for capture, online-converted to 16 kHz mono Float32
   (see `CLAUDE.md` for why not AVAudioEngine)
 - `CGEventTap` watching `flagsChanged` for the Right Option key
-- WhisperKit (Argmax OSS SDK) with `large-v3-v20240930_626MB` by default
+- Dual transcription engines, routed automatically (see below):
+  - FluidAudio Parakeet TDT v3 — low-latency default, ANE-resident
+  - WhisperKit (Argmax OSS SDK) `large-v3-v20240930_626MB` — accuracy /
+    fallback engine, used for languages outside Parakeet's set or when
+    Accuracy Mode is on
+- FluidAudio Silero VAD — pre-ASR speech gate, trims silence and drops
+  no-speech taps before any model runs
 - `NSPasteboard` + synthetic Cmd+V for text injection
 - LaunchAgent for always-on daemon behavior
+
+## Dual-engine routing
+
+Every utterance is gated (silence/too-short dropped, speech trimmed) and then
+routed to one of the two engines:
+
+| Language setting            | Accuracy Mode | Engine   | Notes                                  |
+|------------------------------|:---:|----------|-----------------------------------------|
+| Auto                          | off | Parakeet | model self-detects among its 28 codes  |
+| Pinned, in Parakeet's 28      | off | Parakeet | e.g. `da`, `en`, `sv`, `de`             |
+| Pinned, outside Parakeet's 28 | off | Whisper  | e.g. `no`, `ja`, `zh`, `ko`, `ar`       |
+| Any                            | on  | Whisper  | forces Whisper for every language      |
+
+Parakeet's `Language` enum has **no Norwegian** (`no`/`nb`) — a Nordic-user
+landmine worth knowing about. Norwegian dictation always routes to Whisper,
+whether pinned explicitly or (since it's outside the 28) picked up on Auto
+only if it happens to resemble a supported script; pin it or use Accuracy
+Mode for reliable Norwegian output. The menu's Language ▸ submenu lists the
+28 Parakeet codes plus an explicit "Other (Whisper)" section for Norwegian,
+Japanese, Chinese, Korean, and Arabic.
+
+There is no silent cross-engine fallback: if the routed engine fails to warm
+up or transcribe, you get an error, never a different engine's output
+pretending to be the one you asked for. The one exception is a Parakeet
+launch failure, which flips a `forceWhisper` override (equivalent to Accuracy
+Mode) since Whisper is a safe universal superset.
 
 ## Quick start
 
@@ -91,6 +123,41 @@ See `CLAUDE.md` for the full permissions playbook.
 | ◌ spinner (yellow)      | Transcribing — rotating Naples-yellow symbol |
 | ⚠ exclamationmark       | Error — open the menu for context            |
 
+## CLI mode (headless transcription)
+
+Running the binary with `--transcribe-file` skips the GUI entirely: no
+`NSApplication`, no menu-bar item, no Microphone/Accessibility/Input
+Monitoring prompts. It transcribes one audio file through the exact same
+`DictationPipeline` the GUI uses (gate → route → transcribe → filter) and
+exits with a status code, which makes it safe to call from CI or scripts.
+
+```bash
+local-dictation --transcribe-file <path>
+                [--engine auto|parakeet|whisper]   # default auto = real router
+                [--language <iso>|auto]            # default auto
+                [--accuracy]                       # force Whisper, all languages
+                [--no-vad-gate]                     # bypass the silence/speech gate
+                [--no-hallucination-filter]         # bypass the post-ASR blocklist
+                [--json]                            # machine-readable stdout
+```
+
+Exit codes:
+
+| Code | Meaning                                                  |
+|-----:|-----------------------------------------------------------|
+| 0    | transcript emitted (on stdout)                            |
+| 1    | bad arguments or unreadable file                          |
+| 2    | model load / transcription error                          |
+| 3    | dropped by the gate (`tooShort`/`silence`) or the hallucination filter (reason on stderr) |
+
+`--json` emits `{"text","engine","language","gate","filtered","latencyMs"}` on
+stdout; without it, stdout carries only the plain transcript on success (or
+nothing on a drop) so it stays pipeable, and a one-line summary always goes to
+stderr. `scripts/make-fixtures.sh` generates local `say`-synthesized Danish/
+English fixtures plus a digital-silence WAV; `scripts/test-cli.sh` exercises
+all three exit paths (Parakeet, forced Whisper, gated silence) against the
+release binary — see that script for the exact invocations.
+
 ## Choosing a different model
 
 Set the `LOCAL_DICTATION_MODEL` environment variable to any model name
@@ -147,6 +214,23 @@ scripts/install-app.sh
 launchctl kickstart -k gui/$(id -u)/com.norfeldt.local-dictation
 ```
 
+## Testing
+
+```bash
+swift test                    # pure-logic unit tests, no models, seconds
+scripts/make-fixtures.sh      # generate Tests/fixtures/ (say-synthesized audio)
+swift build -c release
+scripts/test-cli.sh           # e2e: real Parakeet + Whisper models, gated silence
+```
+
+`swift test` runs against the executable target directly
+(`@testable import LocalDictation`) — SPM has supported test targets
+depending on executable targets since Swift 5.5, so there is no separate
+library target to keep in sync. `scripts/test-cli.sh` is not part of that
+suite: it shells out to the release binary and needs the Parakeet v3 +
+Whisper large-v3 models already downloaded, so treat it as a manual/nightly
+check rather than default CI.
+
 ## Known sharp edges
 
 - **Right Option doubles as AltGr** on some non-US layouts. If you
@@ -163,11 +247,23 @@ launchctl kickstart -k gui/$(id -u)/com.norfeldt.local-dictation
 
 | File | Purpose |
 |------|---------|
-| `Sources/LocalDictation/App.swift` | Entry point, app delegate, model warm-up gate |
-| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states incl. Naples yellow listening |
-| `Sources/LocalDictation/HotkeyMonitor.swift` | `CGEventTap` watching Right Option |
-| `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 |
-| `Sources/LocalDictation/Transcriber.swift` | WhisperKit wrapper, lazy model load + warm-up |
+| `Sources/LocalDictation/App.swift` | `@main` entry point (async, branches to CLI or GUI), app delegate, watchdogs |
+| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode |
+| `Sources/LocalDictation/HotkeyMonitor.swift` | `CGEventTap` watching Right Option; `isDown` delegates to `HotkeyStateMachine` |
+| `Sources/LocalDictation/HotkeyStateMachine.swift` | Pure press/release/tap-disabled state machine (unit tested) |
+| `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 (byte-for-byte frozen) |
+| `Sources/LocalDictation/Transcriber.swift` | WhisperKit wrapper; conforms to `TranscriptionEngine` |
+| `Sources/LocalDictation/ParakeetEngine.swift` | FluidAudio Parakeet TDT v3 engine (low-latency default) |
+| `Sources/LocalDictation/TranscriptionEngine.swift` | `EngineKind` + the shared engine protocol |
+| `Sources/LocalDictation/EngineRouter.swift` | Pure language/Accuracy-Mode → engine routing decision |
+| `Sources/LocalDictation/LanguageSetting.swift` | `UserDefaults`-backed language pin + Accuracy Mode toggle |
+| `Sources/LocalDictation/SpeechGate.swift` | Actor over FluidAudio's Silero VAD; degrades gracefully if unavailable |
+| `Sources/LocalDictation/SpeechGateLogic.swift` | Pure gate decision + speech-region trimming (unit tested, no models) |
+| `Sources/LocalDictation/HallucinationFilter.swift` | Pure post-ASR blocklist + repetition-loop guard |
+| `Sources/LocalDictation/DictationPipeline.swift` | Actor: gate → route → transcribe → filter (single reuse point, GUI + CLI) |
+| `Sources/LocalDictation/UtteranceStateMachine.swift` | Pure recording/transcription bookkeeping with monotonic IDs |
+| `Sources/LocalDictation/WavLoader.swift` | `AVAudioFile` → 16 kHz mono Float32 for CLI fixtures (CLI-only; recorder untouched) |
+| `Sources/LocalDictation/CLI.swift` | `CLIArguments` parser + `CLIRunner` for `--transcribe-file` |
 | `Sources/LocalDictation/TextInjector.swift` | `NSPasteboard` + Cmd+V injection, AX-trust check |
 | `Sources/LocalDictation/Permissions.swift` | Mic + Accessibility prompts |
 | `Sources/LocalDictation/Log.swift` | Tee logger to stderr + file + unified logging |
@@ -176,3 +272,5 @@ launchctl kickstart -k gui/$(id -u)/com.norfeldt.local-dictation
 | `scripts/sign.sh` | Sign the raw `.build` binary (stable identity) |
 | `scripts/install-daemon.sh` | Install LaunchAgent |
 | `scripts/uninstall-daemon.sh` | Remove LaunchAgent |
+| `scripts/make-fixtures.sh` | Generate `Tests/fixtures/` audio (Danish, English, silence) via `say` |
+| `scripts/test-cli.sh` | CLI e2e harness — Parakeet, forced Whisper, gated silence |
