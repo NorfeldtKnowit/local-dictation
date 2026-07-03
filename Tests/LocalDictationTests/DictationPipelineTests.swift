@@ -76,6 +76,7 @@ final class DictationPipelineTests: XCTestCase {
 
         XCTAssertEqual(out.gate, .silence)
         XCTAssertEqual(out.text, "")
+        XCTAssertNil(out.engine)   // no ASR ran — not a placeholder engine
         XCTAssertFalse(out.filtered)
         XCTAssertEqual(out.inferenceSeconds, 0)
         let pCount = await parakeet.transcribeCount
@@ -96,6 +97,7 @@ final class DictationPipelineTests: XCTestCase {
 
         XCTAssertEqual(out.gate, .tooShort)
         XCTAssertEqual(out.text, "")
+        XCTAssertNil(out.engine)
         let pCount = await parakeet.transcribeCount
         XCTAssertEqual(pCount, 0)
     }

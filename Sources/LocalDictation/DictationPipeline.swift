@@ -18,9 +18,9 @@ actor DictationPipeline {
         /// transcript was suppressed by the hallucination filter (distinguish the
         /// two via `gate` and `filtered`).
         let text: String
-        /// Which engine ran. For a gated-out utterance (no ASR) this is a
-        /// placeholder (`.parakeet`) — inspect `gate` to know it never ran.
-        let engine: EngineKind
+        /// Which engine ran, or nil when no ASR ran at all (the utterance was
+        /// gated out before routing).
+        let engine: EngineKind?
         /// Why the gate passed or dropped this utterance.
         let gate: GateDecision
         /// True iff ASR produced non-empty text that the hallucination filter
@@ -100,7 +100,7 @@ actor DictationPipeline {
             ? SpeechGate.Outcome(decision: .vadUnavailable, audio: samples)
             : await gate.evaluate(samples)
         guard gated.decision == .pass || gated.decision == .vadUnavailable else {
-            return Outcome(text: "", engine: .parakeet, gate: gated.decision,
+            return Outcome(text: "", engine: nil, gate: gated.decision,
                            filtered: false, inferenceSeconds: 0)
         }
 

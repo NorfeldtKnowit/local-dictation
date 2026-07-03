@@ -205,7 +205,7 @@ enum CLIRunner {
         if let dropReason {
             stderr("dropped: \(dropReason)")
         }
-        stderr("cli done: engine=\(outcome.engine.rawValue) gate=\(gateName(outcome.gate)) "
+        stderr("cli done: engine=\(outcome.engine?.rawValue ?? "none") gate=\(gateName(outcome.gate)) "
              + "filtered=\(outcome.filtered) latencyMs=\(Int(outcome.inferenceSeconds * 1000)) exit=\(exitCode)")
         return exitCode
     }
@@ -213,10 +213,11 @@ enum CLIRunner {
     // MARK: - Output helpers
 
     /// `{"text","engine","language","gate","filtered","latencyMs"}` — one line.
+    /// `engine` is omitted when no ASR ran (gated-out utterance).
     private static func jsonLine(_ outcome: DictationPipeline.Outcome, language: String) -> String {
         struct Payload: Encodable {
             let text: String
-            let engine: String
+            let engine: String?
             let language: String
             let gate: String
             let filtered: Bool
@@ -224,7 +225,7 @@ enum CLIRunner {
         }
         let payload = Payload(
             text: outcome.text,
-            engine: outcome.engine.rawValue,
+            engine: outcome.engine?.rawValue,
             language: language,
             gate: gateName(outcome.gate),
             filtered: outcome.filtered,
