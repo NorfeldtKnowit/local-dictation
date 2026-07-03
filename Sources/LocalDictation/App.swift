@@ -158,6 +158,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 utterance.engineReady = true
                 Log.info("model ready", "app")
                 menuBar.update(.idle)
+                // Pre-DOWNLOAD (not load) the Whisper model in the background so
+                // the first Whisper-routed utterance never downloads ~1.5 GB
+                // mid-dictation (or fails offline). Low priority, best-effort:
+                // a failure only logs — the lazy download inside warmUp() stays
+                // as the fallback. GUI-only by construction (this is the
+                // menu-bar launch path; the CLI never runs this code).
+                Task.detached(priority: .background) { [whisper] in
+                    do {
+                        try await whisper.predownloadModel()
+                    } catch {
+                        Log.warn("whisper model pre-download failed (will download lazily on first use): \(error)", "whisper")
+                    }
+                }
             } catch {
                 // Launch-time exception to "never substitute engines": Whisper
                 // covers every language Parakeet does, so forcing it is always

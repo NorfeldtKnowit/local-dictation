@@ -33,6 +33,22 @@ actor Transcriber: TranscriptionEngine {
         _ = try await loadedPipe()
     }
 
+    /// Download-only: fetch the model files into the local cache WITHOUT loading
+    /// or compiling them (no RAM/ANE cost). `WhisperKit.download(variant:)` is the
+    /// same call `WhisperKit(config)` / `setupModels` uses internally with the
+    /// same repo + downloadBase defaults, so a later `warmUp()` finds everything
+    /// on disk. Idempotent: already-cached files are skipped by the Hub snapshot.
+    /// Used by the GUI's background pre-download at launch; failure (e.g. offline)
+    /// is the caller's to log — the lazy download inside `warmUp()` remains the
+    /// fallback.
+    func predownloadModel() async throws {
+        guard pipe == nil else { return }   // already loaded → nothing to fetch
+        Log.info("pre-downloading WhisperKit model='\(modelName)' (~1.5 GB on a fresh install)", "whisper")
+        let t0 = Date()
+        _ = try await WhisperKit.download(variant: modelName)
+        Log.info("WhisperKit model pre-download done in \(String(format: "%.1f", Date().timeIntervalSince(t0)))s", "whisper")
+    }
+
     /// Transcribes a Float32 16 kHz mono buffer and returns plain text.
     /// - Parameter language: ISO code ("da") to pin, or nil to auto-detect.
     func transcribe(samples: [Float], language: String?) async throws -> String {
