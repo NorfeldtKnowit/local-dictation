@@ -4,11 +4,14 @@ import WhisperKit
 /// Wraps WhisperKit. The model is loaded lazily on the first transcription
 /// so app launch stays fast; the ~600 MB download happens on first use.
 actor Transcriber {
-    /// Whisper-large-v3 (Sep 2024 weights) with turbo decoder (4 layers
-    /// vs. 32) and 4-bit quantization, ~632 MB. Multilingual including
-    /// Danish, and roughly 5-8× faster than the non-turbo large-v3 with
-    /// near-identical accuracy. Override via LOCAL_DICTATION_MODEL.
-    static let defaultModel = "openai_whisper-large-v3-v20240930_turbo_632MB"
+    /// Whisper-large-v3-turbo (Sep 2024 weights), full precision, ~1.5 GB.
+    /// Same turbo decoder (fast) as the old 632 MB default but WITHOUT the
+    /// aggressive quantization that was hurting accuracy on Danish — the
+    /// quantized 632 MB build felt "Siri quality". Multilingual incl. Danish.
+    /// Override via LOCAL_DICTATION_MODEL (e.g. "openai_whisper-large-v3" for
+    /// the slower, most-accurate non-turbo model, or
+    /// "openai_whisper-large-v3-v20240930_turbo_632MB" to revert).
+    static let defaultModel = "openai_whisper-large-v3-v20240930"
 
     private var pipe: WhisperKit?
     private let modelName: String
