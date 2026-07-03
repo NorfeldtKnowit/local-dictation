@@ -146,15 +146,22 @@ enum CLIRunner {
         }
 
         // 2. Build the same engines + gate + pipeline the GUI uses.
+        let gate = SpeechGate()
         let pipeline = DictationPipeline(
             parakeet: ParakeetEngine(),
             whisper: Transcriber(),
-            gate: SpeechGate()
+            gate: gate
         )
-        // Warm the launch defaults (VAD + Parakeet). Models are cached locally so
-        // this is fast; a failure to load Parakeet surfaces as a model error.
+        // Warm the VAD gate (fail-open, never throws), then ONLY the engine this
+        // run will actually use — a `--engine whisper` / Whisper-routed run must
+        // not require the Parakeet models to be present.
+        await gate.warmUp()
         do {
-            try await pipeline.warmUpDefaults()
+            _ = try await pipeline.prepareEngine(
+                language: args.language,
+                accuracyMode: args.accuracy,
+                forcedEngine: args.forcedEngine
+            )
         } catch {
             stderr("error: warm-up failed: \(error)")
             return 2
