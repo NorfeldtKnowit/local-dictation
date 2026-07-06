@@ -55,6 +55,23 @@ private struct FakeGate: GateProviding {
     func evaluate(_ samples: [Float]) async -> SpeechGate.Outcome { outcome }
 }
 
+/// A `TranscriptPolishing` fake: canned result (nil == decline) + call capture.
+private actor FakePolisher: TranscriptPolishing {
+    private let result: String?
+    private(set) var polishCount = 0
+    private(set) var lastInput: String?
+
+    init(result: String?) { self.result = result }
+
+    func warmUp() async {}
+
+    func polish(_ text: String) async -> String? {
+        polishCount += 1
+        lastInput = text
+        return result
+    }
+}
+
 /// Thread-safe recorder for the `@Sendable` cold-load callback (which is a
 /// synchronous closure, so it can't `await` into an actor).
 private final class ColdLoadRecorder: @unchecked Sendable {
@@ -79,9 +96,10 @@ final class DictationPipelineTests: XCTestCase {
     private func makePipeline(
         parakeet: FakeEngine,
         whisper: FakeEngine,
-        gate: FakeGate
+        gate: FakeGate,
+        polisher: FakePolisher? = nil
     ) -> DictationPipeline {
-        DictationPipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+        DictationPipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
     }
 
     func testSilenceNeverCallsEngine() async throws {
@@ -631,6 +649,109 @@ final class DictationPipelineTests: XCTestCase {
         XCTAssertEqual(wCount, 0)
         let pCount = await parakeet.transcribeCount
         XCTAssertEqual(pCount, 3)             // whole + 2-segment scan
+    }
+
+    // MARK: - Polish (layer 4)
+
+    func testPolishRewriteUsedWhenEnabled() async throws {
+        let asrText = "So basically I want to refactor the parser module."
+        let parakeet = FakeEngine(kind: .parakeet, output: asrText, startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: "I want to refactor the parser module.")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertEqual(out.text, "I want to refactor the parser module.")
+        XCTAssertTrue(out.polished)
+        // The polisher must see the FILTERED text (layers 1-3 already applied).
+        let input = await polisher.lastInput
+        XCTAssertEqual(input, asrText)
+    }
+
+    func testPolishOffByDefault() async throws {
+        let parakeet = FakeEngine(kind: .parakeet, output: "plain text output here", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: "should never be used")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false)
+
+        XCTAssertEqual(out.text, "plain text output here")
+        XCTAssertFalse(out.polished)
+        let count = await polisher.polishCount
+        XCTAssertEqual(count, 0)
+    }
+
+    func testPolishDeclineKeepsFilteredText() async throws {
+        // nil from the polisher (unavailable / rejected / timeout) must keep
+        // the filtered ASR text and report polished=false — never a drop.
+        let parakeet = FakeEngine(kind: .parakeet, output: "keep me exactly as is", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: nil)
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertEqual(out.text, "keep me exactly as is")
+        XCTAssertFalse(out.polished)
+        let count = await polisher.polishCount
+        XCTAssertEqual(count, 1)
+    }
+
+    func testGatedUtteranceNeverPolished() async throws {
+        let parakeet = FakeEngine(kind: .parakeet, output: "unused", startWarm: true)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .silence, audio: []))
+        let polisher = FakePolisher(result: "should never be used")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "auto", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertEqual(out.text, "")
+        XCTAssertFalse(out.polished)
+        let count = await polisher.polishCount
+        XCTAssertEqual(count, 0)
+    }
+
+    func testFilterSuppressedUtteranceNeverPolished() async throws {
+        // A hallucination-filtered ghost is empty text: polish must not run on
+        // it (nothing to refine, and the model could invent content from "").
+        let parakeet = FakeEngine(kind: .parakeet, output: "thanks for watching", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: "should never be used")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertEqual(out.text, "")
+        XCTAssertTrue(out.filtered)
+        XCTAssertFalse(out.polished)
+        let count = await polisher.polishCount
+        XCTAssertEqual(count, 0)
+    }
+
+    func testPolishWithoutPolisherIsANoOp() async throws {
+        // A pipeline built without a polisher (CLI fakes, future fronts) must
+        // treat polish=true as a silent no-op, not a crash or a drop.
+        let parakeet = FakeEngine(kind: .parakeet, output: "still the parakeet text", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertEqual(out.text, "still the parakeet text")
+        XCTAssertFalse(out.polished)
     }
 
     func testMixedTranscriptWithoutSegmentBoundariesKeepsParakeet() async throws {

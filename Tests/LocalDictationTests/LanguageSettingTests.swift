@@ -18,10 +18,11 @@ final class LanguageSettingTests: XCTestCase {
         super.tearDown()
     }
 
-    func testDefaultsAutoAndAccuracyOff() {
+    func testDefaultsAutoAccuracyOffPolishOn() {
         let setting = LanguageSetting(defaults: defaults)
         XCTAssertEqual(setting.language, "auto")
         XCTAssertFalse(setting.accuracyMode)
+        XCTAssertTrue(setting.polishTranscript)   // default-ON, opt-out toggle
     }
 
     func testPinPersists() {
@@ -35,5 +36,13 @@ final class LanguageSettingTests: XCTestCase {
         let setting = LanguageSetting(defaults: defaults)
         setting.accuracyMode = true
         XCTAssertTrue(LanguageSetting(defaults: defaults).accuracyMode)
+    }
+
+    func testPolishOptOutPersists() {
+        // The non-default value (false) is the one that must round-trip: it
+        // proves the object probe distinguishes "set to false" from "never set".
+        let setting = LanguageSetting(defaults: defaults)
+        setting.polishTranscript = false
+        XCTAssertFalse(LanguageSetting(defaults: defaults).polishTranscript)
     }
 }

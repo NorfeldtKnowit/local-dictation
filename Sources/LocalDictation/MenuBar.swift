@@ -23,6 +23,8 @@ final class MenuBar {
     private let languageMenu = NSMenu()
     private let accuracyMenuItem = NSMenuItem(title: "Accuracy Mode (Whisper, all languages)",
                                               action: nil, keyEquivalent: "")
+    private let polishMenuItem = NSMenuItem(title: "Polish Transcript (AI cleanup)",
+                                            action: nil, keyEquivalent: "")
 
     /// Whisper-only pins offered below the Parakeet set. Norwegian is here on
     /// purpose: FluidAudio's `Language` enum has no "no"/"nb", so Norwegian must
@@ -45,6 +47,8 @@ final class MenuBar {
     var onSelectLanguage: ((String) -> Void)?
     /// Fired with the new value when the user toggles Accuracy Mode.
     var onToggleAccuracy: ((Bool) -> Void)?
+    /// Fired with the new value when the user toggles Polish Transcript.
+    var onTogglePolish: ((Bool) -> Void)?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -84,6 +88,13 @@ final class MenuBar {
         accuracyMenuItem.action = #selector(toggleAccuracy)
         accuracyMenuItem.toolTip = "Route every utterance to Whisper large-v3 — slower, most accurate, all languages."
         menu.addItem(accuracyMenuItem)
+
+        polishMenuItem.target = self
+        polishMenuItem.action = #selector(togglePolish)
+        polishMenuItem.toolTip = "Fix misheard words, restarts and fillers with the on-device Apple "
+                               + "Intelligence model. Requires Apple Intelligence to be enabled in "
+                               + "System Settings; inactive (no effect) otherwise."
+        menu.addItem(polishMenuItem)
         menu.addItem(.separator())
 
         let micItem = NSMenuItem(title: "Open Microphone settings…",
@@ -181,6 +192,13 @@ final class MenuBar {
         }
     }
 
+    /// Render the Polish Transcript checkbox.
+    func setPolishTranscript(_ enabled: Bool) {
+        DispatchQueue.main.async { [self] in
+            polishMenuItem.state = enabled ? .on : .off
+        }
+    }
+
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         setLanguage(code)
@@ -191,6 +209,12 @@ final class MenuBar {
         let enabled = accuracyMenuItem.state != .on
         setAccuracyMode(enabled)
         onToggleAccuracy?(enabled)
+    }
+
+    @objc private func togglePolish() {
+        let enabled = polishMenuItem.state != .on
+        setPolishTranscript(enabled)
+        onTogglePolish?(enabled)
     }
 
     func update(_ state: State) {

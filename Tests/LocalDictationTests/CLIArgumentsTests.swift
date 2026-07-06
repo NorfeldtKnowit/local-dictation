@@ -26,6 +26,7 @@ final class CLIArgumentsTests: XCTestCase {
         XCTAssertFalse(cli.accuracy)
         XCTAssertTrue(cli.vadGate)
         XCTAssertTrue(cli.hallucinationFilter)
+        XCTAssertTrue(cli.polish)
         XCTAssertFalse(cli.json)
     }
 
@@ -61,9 +62,11 @@ final class CLIArgumentsTests: XCTestCase {
             "--transcribe-file", "/tmp/a.wav",
             "--no-vad-gate",
             "--no-hallucination-filter",
+            "--no-polish",
         ]) else { return }
         XCTAssertFalse(cli.vadGate)
         XCTAssertFalse(cli.hallucinationFilter)
+        XCTAssertFalse(cli.polish)
     }
 
     func testJsonParsed() {

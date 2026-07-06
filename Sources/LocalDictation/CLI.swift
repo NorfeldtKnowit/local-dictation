@@ -31,6 +31,11 @@ struct CLIArguments: Equatable {
     /// True by default; `--no-hallucination-filter` sets it false to bypass the
     /// post-ASR blocklist/repetition guard (layer 3).
     var hallucinationFilter: Bool
+    /// True by default; `--no-polish` sets it false to skip the LLM transcript
+    /// polish (layer 4). With it on, polish still no-ops gracefully when the
+    /// Apple Intelligence model is unavailable — the flag exists so CI and
+    /// A/B replays are deterministic regardless of the host's model state.
+    var polish: Bool
     /// `--json`: emit a machine-readable object on stdout instead of plain text.
     var json: Bool
 
@@ -49,6 +54,7 @@ struct CLIArguments: Equatable {
                                [--accuracy]
                                [--no-vad-gate]
                                [--no-hallucination-filter]
+                               [--no-polish]
                                [--json]
         Without --transcribe-file the menu-bar GUI launches (any other
         arguments, e.g. macOS-injected -psn_… tokens, are ignored).
@@ -75,6 +81,7 @@ struct CLIArguments: Equatable {
         var accuracy = false
         var vadGate = true
         var hallucinationFilter = true
+        var polish = true
         var json = false
 
         var i = 0
@@ -107,6 +114,7 @@ struct CLIArguments: Equatable {
             case "--accuracy":                accuracy = true; i += 1
             case "--no-vad-gate":             vadGate = false; i += 1
             case "--no-hallucination-filter": hallucinationFilter = false; i += 1
+            case "--no-polish":               polish = false; i += 1
             case "--json":                    json = true; i += 1
             default:
                 return .failure(.init(message: "unknown argument: \(arg)"))
@@ -123,6 +131,7 @@ struct CLIArguments: Equatable {
             accuracy: accuracy,
             vadGate: vadGate,
             hallucinationFilter: hallucinationFilter,
+            polish: polish,
             json: json
         ))
     }
@@ -150,7 +159,8 @@ enum CLIRunner {
         let pipeline = DictationPipeline(
             parakeet: ParakeetEngine(),
             whisper: Transcriber(),
-            gate: gate
+            gate: gate,
+            polisher: TranscriptPolisher()
         )
         // Warm the VAD gate (fail-open, never throws), then ONLY the engine this
         // run will actually use — a `--engine whisper` / Whisper-routed run must
@@ -176,7 +186,8 @@ enum CLIRunner {
                 accuracyMode: args.accuracy,
                 forcedEngine: args.forcedEngine,
                 bypassGate: !args.vadGate,
-                bypassFilter: !args.hallucinationFilter
+                bypassFilter: !args.hallucinationFilter,
+                polish: args.polish
             )
         } catch {
             stderr("error: transcription failed: \(error)")
@@ -207,6 +218,7 @@ enum CLIRunner {
         }
         stderr("cli done: engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate.rawValue) "
              + "filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") "
+             + "polished=\(outcome.polished) "
              + "latencyMs=\(Int(outcome.inferenceSeconds * 1000)) exit=\(exitCode)")
         return exitCode
     }
@@ -227,6 +239,8 @@ enum CLIRunner {
             /// omitted when `rescued` is false. Additive — `rescued` stays a
             /// Bool so existing consumers keep parsing.
             let rescue: String?
+            /// True iff layer 4 rewrote the text (guardrails accepted).
+            let polished: Bool
             let latencyMs: Int
         }
         let payload = Payload(
@@ -237,6 +251,7 @@ enum CLIRunner {
             filtered: outcome.filtered,
             rescued: outcome.rescued,
             rescue: outcome.rescue?.rawValue,
+            polished: outcome.polished,
             latencyMs: Int(outcome.inferenceSeconds * 1000)
         )
         let encoder = JSONEncoder()

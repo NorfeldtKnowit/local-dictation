@@ -66,7 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let parakeet = ParakeetEngine()
     private let whisper = Transcriber()
     private let gate = SpeechGate()
-    private lazy var pipeline = DictationPipeline(parakeet: parakeet, whisper: whisper, gate: gate)
+    private let polisher = TranscriptPolisher()
+    private lazy var pipeline = DictationPipeline(parakeet: parakeet, whisper: whisper, gate: gate,
+                                                  polisher: polisher)
 
     /// Persisted language pin + Accuracy Mode; rendered by MenuBar, owned here.
     private let settings = LanguageSetting()
@@ -134,8 +136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.settings.accuracyMode = enabled
             Log.info("accuracy mode: \(enabled)", "app")
         }
+        menuBar.onTogglePolish = { [weak self, polisher] enabled in
+            self?.settings.polishTranscript = enabled
+            Log.info("polish transcript: \(enabled)", "app")
+            // Turning it on mid-session: page the model in now, not on the
+            // first polished utterance. No-op when unavailable or already warm.
+            if enabled { Task.detached(priority: .background) { await polisher.warmUp() } }
+        }
         menuBar.setLanguage(settings.language)
         menuBar.setAccuracyMode(settings.accuracyMode)
+        menuBar.setPolishTranscript(settings.polishTranscript)
 
         // Additive AVCaptureSession runtime-error observer. AudioRecorder itself
         // is deliberately untouched (sacred capture path, see CLAUDE.md), so we
@@ -190,6 +200,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 utterance.engineReady = true
                 Log.info("model ready", "app")
                 menuBar.update(.idle)
+                // Page the polish model in ahead of the first utterance (a few
+                // hundred MB, managed by the OS). Declines instantly when the
+                // toggle is off or Apple Intelligence is unavailable.
+                if settings.polishTranscript {
+                    Task.detached(priority: .background) { [polisher] in await polisher.warmUp() }
+                }
                 // Pre-download AND pre-load Whisper in the background. Danish
                 // (a daily language here) now quality-routes to Whisper, so its
                 // model is no longer a rare fallback: without a pre-load the
@@ -332,6 +348,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // can't retroactively alter an utterance that was already spoken.
         let language = settings.language
         let accuracy = settings.accuracyMode || forceWhisper
+        let polish = settings.polishTranscript
 
         Task { @MainActor in
             do {
@@ -360,11 +377,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await pipeline.process(
                         samples: samples,
                         language: language,
-                        accuracyMode: accuracy
+                        accuracyMode: accuracy,
+                        polish: polish
                     )
                 }
                 utterance.settled(id)
-                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
+                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") polished=\(outcome.polished) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
                 // Never paste directly: the sequencer restores spoken order for
                 // overlapping utterances (an empty text still advances the queue).
                 pasteSequencer.complete(id: id, text: outcome.text)

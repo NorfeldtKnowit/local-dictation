@@ -1,10 +1,10 @@
 import Foundation
 
-/// The single place where gate → route → transcribe → filter happens, shared by
-/// both front-ends (the GUI menu-bar dictation and the CLI `--transcribe-file`
-/// mode). Keeping this as the one reuse point is deliberate: it is the only way
-/// to guarantee the two entry paths can't drift in behaviour (routing, gating,
-/// hallucination filtering all stay identical).
+/// The single place where gate → route → transcribe → filter → polish happens,
+/// shared by both front-ends (the GUI menu-bar dictation and the CLI
+/// `--transcribe-file` mode). Keeping this as the one reuse point is deliberate:
+/// it is the only way to guarantee the two entry paths can't drift in behaviour
+/// (routing, gating, text filtering and polish all stay identical).
 ///
 /// An actor because it holds the two engines (themselves actors) plus the gate,
 /// and because a fresh utterance may be dispatched while a previous one is still
@@ -35,6 +35,12 @@ actor DictationPipeline {
         /// Convenience for logs / JSON consumers that only care whether any
         /// rescue happened.
         var rescued: Bool { rescue != nil }
+        /// True iff the polish stage produced a rewrite that DIFFERS from the
+        /// filtered ASR text and was used as `text`. False when polish was
+        /// off, the model unavailable, the rewrite rejected or a verbatim
+        /// echo, or the call failed/timed out — `text` is then the filtered
+        /// ASR text unchanged.
+        var polished: Bool = false
     }
 
     /// Why an auto-routed Parakeet transcript was re-run through Whisper.
@@ -63,15 +69,18 @@ actor DictationPipeline {
     private let parakeet: any TranscriptionEngine   // ParakeetEngine
     private let whisper: any TranscriptionEngine    // Transcriber
     private let gate: GateProviding                 // SpeechGate (or a test fake)
+    private let polisher: (any TranscriptPolishing)?  // TranscriptPolisher (or a test fake)
     private let rescueConfidence: Double
 
     init(parakeet: any TranscriptionEngine,
          whisper: any TranscriptionEngine,
          gate: GateProviding,
+         polisher: (any TranscriptPolishing)? = nil,
          rescueConfidence: Double = DictationPipeline.defaultRescueConfidence) {
         self.parakeet = parakeet
         self.whisper = whisper
         self.gate = gate
+        self.polisher = polisher
         self.rescueConfidence = rescueConfidence
     }
 
@@ -117,6 +126,10 @@ actor DictationPipeline {
     ///     Used by raw-ASR regression tests; defaults false so the GUI is unaffected.
     ///   - bypassFilter: CLI `--no-hallucination-filter` — skip layer 3 and return
     ///     the raw ASR text. Defaults false so the GUI is unaffected.
+    ///   - polish: run layer 4, the LLM transcript polish (menu toggle / CLI
+    ///     `--no-polish`). Only ever a quality upgrade: any decline — model
+    ///     unavailable, guardrail reject, error, timeout — keeps the filtered
+    ///     ASR text. No-op when the pipeline was built without a polisher.
     ///   - onColdLoad: fired (once, before the blocking warm-up) when the routed
     ///     engine isn't warm yet, so the GUI can show "Loading … model (first
     ///     use)…". Never fired for an already-warm engine.
@@ -126,6 +139,7 @@ actor DictationPipeline {
                  forcedEngine: EngineKind? = nil,
                  bypassGate: Bool = false,
                  bypassFilter: Bool = false,
+                 polish: Bool = false,
                  onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> Outcome {
         // Layers 1+2 (duration + VAD). Only `.pass` (trimmed) or `.vadUnavailable`
         // (raw, fail-open) proceed to ASR; `.tooShort` / `.silence` short-circuit
@@ -235,14 +249,29 @@ actor DictationPipeline {
         }
         let inference = Date().timeIntervalSince(t0)
 
-        // Layer 3: post-ASR hallucination filter (whole-output blocklist + loop
-        // guard). `--no-hallucination-filter` returns the raw ASR text untouched.
+        // Layer 3: post-ASR text filters — hallucination guard (whole-output
+        // blocklist + loop guard) then standalone-filler strip.
+        // `--no-hallucination-filter` returns the raw ASR text untouched.
         let raw = result.text
-        let cleaned = bypassFilter ? raw : HallucinationFilter.clean(raw)
-        return Outcome(text: cleaned, engine: usedKind, gate: gated.decision,
+        let cleaned = bypassFilter ? raw : FillerFilter.strip(HallucinationFilter.clean(raw))
+
+        // Layer 4: optional LLM polish. Never runs on empty/suppressed text
+        // (gated-out utterances returned before ASR; errors threw above), and
+        // any decline keeps `cleaned` — polish can lose nothing, only refine.
+        var text = cleaned
+        var polished = false
+        if polish, !cleaned.isEmpty, let polisher,
+           let refined = await polisher.polish(cleaned),
+           refined != cleaned {   // verbatim echo == "already clean", not a rewrite
+            // The pre-polish ASR text must stay recoverable from the log.
+            Log.info("polish rewrote: \"\(cleaned.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
+            text = refined
+            polished = true
+        }
+        return Outcome(text: text, engine: usedKind, gate: gated.decision,
                        filtered: cleaned.isEmpty && !raw.isEmpty,
                        inferenceSeconds: inference,
-                       rescue: rescue)
+                       rescue: rescue, polished: polished)
     }
 
     private func warmWhisper(onColdLoad: (@Sendable (EngineKind) -> Void)?) async throws {
