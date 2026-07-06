@@ -29,7 +29,10 @@ transcribe → inject:
 - `SpeechGate.swift` / `SpeechGateLogic.swift` — pre-ASR VAD guard: actor
   wrapper (degrades gracefully if Silero is unavailable) + pure decision/trim
   logic.
-- `EngineRouter.swift` — pure language/Accuracy-Mode → engine decision.
+- `EngineRouter.swift` — pure language/Accuracy-Mode → engine decision, the
+  `whisperPreferred` set (Danish), and the post-Parakeet `textRescuePlan`.
+- `TextLanguageID.swift` — text language ID over ASR output (OS-bundled
+  `NLLanguageRecognizer`; sentence-level weights detect code-switching).
 - `TranscriptionEngine.swift` — shared protocol + `EngineKind`.
 - `ParakeetEngine.swift` — FluidAudio Parakeet TDT v3 (low-latency default).
 - `Transcriber.swift` — WhisperKit wrapper, conforms to `TranscriptionEngine`.
@@ -153,10 +156,21 @@ then filters; it is the single reuse point for both the GUI and the CLI
 
 | language setting | accuracyMode | engine | hint passed |
 |---|:---:|---|---|
-| `auto` | off | Parakeet | `nil` (model self-detects among its 28) |
-| code in Parakeet's 28 (da, en, sv, …) | off | Parakeet | `Language(rawValue:)` script filter |
+| `auto` | off | Parakeet | `nil` (self-detects; rescue layers below may re-run via Whisper) |
+| code in `whisperPreferred` (**da**) | off | Whisper | `DecodingOptions.language`, `detectLanguage: false` |
+| other code in Parakeet's 28 (en, sv, …) | off | Parakeet | `Language(rawValue:)` script filter |
 | code not in Parakeet's 28 (ja, zh, ar, ko, **no**, …) | off | Whisper | `DecodingOptions.language`, `detectLanguage: false` |
 | any | on | Whisper | code or nil+detect |
+
+`EngineRouter.whisperPreferred` (currently `{"da"}`) marks languages Parakeet
+nominally supports but transcribes measurably worse than Whisper. A/B on a
+real utterance (2026-07-06, `fixtures-real/danish-tech-utterance5.wav` —
+gitignored real-voice audio, exists locally only):
+Parakeet produced "komet omskrivning af foreningen … starte forfar" at
+confidence **0.96**; Whisper pinned `da` produced the correct "komplet
+omskrivning af forgreningen … starte forfra". That 0.96 is the key fact —
+within-language errors score as high as clean output, so no confidence
+threshold can catch them; routing and text LID (below) are the levers.
 
 There is deliberately no silent cross-engine fallback: a warm-up/transcribe
 failure on the routed engine surfaces as an error, never a different engine's
@@ -165,23 +179,40 @@ Parakeet launch failure, which flips a `forceWhisper` override (equivalent to
 Accuracy Mode): Whisper is a safe universal superset, so that direction is
 always correct.
 
-### Confidence rescue: Parakeet cannot be forced to a language
+### The three rescue layers (auto mode only)
 
-Parakeet v3's `language:` hint is only a script filter. Danish and English are
-both Latin script, so a pinned `da` cannot stop the model from decoding Danish
-speech as English gibberish; the only tell is low confidence. Measured on this
-machine: clean same-language audio scores 0.88-0.97, and a real Danish
-utterance that Parakeet decoded as English scored 0.59. `DictationPipeline`
-therefore rescues any auto-routed Parakeet result whose confidence is below
-0.80 (`DictationPipeline.defaultRescueConfidence`) by re-running the audio
-through Whisper, where a pinned language IS forced
-(`DecodingOptions.language`). Rules: a forced `--engine` never rescues (the
-explicit choice wins), engines reporting nil confidence never trigger it, and
-a failed rescue keeps Parakeet's text (a dubious transcript beats a lost
-utterance). Outcomes carry `rescued` in the log line and CLI JSON. The first
-rescue after launch pays Whisper's warm load (about 5-8 s, menu shows the
-loading state); Whisper then stays resident, so later rescues cost only its
-inference (about 1-2 s).
+In auto mode `DictationPipeline` may re-run a Parakeet transcript through
+Whisper. Which layer fired is in the log line and CLI JSON (`rescued=` /
+`"rescue"`: `confidence` | `language` | `code-switch`). Shared rules: a forced
+`--engine` never rescues (explicit choice wins), a pinned language never
+text-rescues (only the confidence layer applies there), and any rescue
+failure keeps Parakeet's text — a dubious transcript beats a lost utterance.
+
+1. **Confidence** (< 0.80, `DictationPipeline.defaultRescueConfidence`).
+   Parakeet v3's `language:` hint is only a script filter; Danish and English
+   are both Latin, so a wrong-language decode's only tell is low confidence
+   (measured: 0.88-0.97 clean vs 0.59 for Danish decoded as English). Whole
+   buffer re-runs through Whisper, where a pin IS forced.
+2. **Language** (`EngineRouter.textRescuePlan` → `.wholeUtterance`). The
+   transcript READS as a whisper-preferred language per `TextLanguageID`
+   (sentence-level, char-weighted; `nb` folds into `da` — NLLanguageRecognizer
+   often labels garbled Danish as Bokmål). Catches Parakeet's
+   high-confidence-but-wrong Danish, which layer 1 cannot.
+3. **Code-switch** (`.perSegment`, or a segment scan when the whole-buffer
+   text looks monolingual but the gate found 2+ VAD segments — Parakeet can
+   silently DROP a whole sentence in the other language at confidence 1.00,
+   leaving no textual trace). Each pause-separated segment is transcribed by
+   Parakeet for LID, consecutive Danish segments merge into runs that re-run
+   through Whisper pinned `da`, other segments keep Parakeet text, pieces
+   join in spoken order. Needs a ~0.6-0.8 s pause at the language switch (see
+   `SpeechGate.segConfig` — the VAD's 4096-sample hop quantizes
+   `minSilenceDuration` up to whole frames).
+
+Whisper is pre-loaded in the background at GUI launch (a rescue would
+otherwise pay the ~5-8 s warm load mid-dictation; `warmUp`, not just
+`predownloadModel`); set `LOCAL_DICTATION_PRELOAD_WHISPER=0` in the
+LaunchAgent plist to keep it lazy and save ~1.5 GB residency. Once resident,
+rescues cost only Whisper inference (about 1-2 s).
 
 ### Debugging bad transcripts: the last utterance is on disk
 
@@ -260,7 +291,8 @@ at the deadline (regression-tested in `AsyncTimeoutTests`).
   no mic, seconds to run, safe for default CI.
 - `scripts/test-cli.sh` is the model-touching e2e layer: it drives the real
   release binary's `--transcribe-file` mode against `scripts/make-fixtures.sh`
-  fixtures (Danish → Parakeet, English forced through `--engine whisper`,
+  fixtures (Danish → Whisper via `whisperPreferred` routing, English →
+  Parakeet via the router, English forced through `--engine whisper`,
   digital silence → exit 3 **and** `dropped: silence`/`gate=silence` on
   stderr, because exit 3 alone is ambiguous with a hallucination-filter drop
   after a VAD fail-open) and needs Parakeet v3 + Whisper large-v3 already cached

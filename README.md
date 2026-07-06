@@ -33,17 +33,32 @@ routed to one of the two engines:
 
 | Language setting            | Accuracy Mode | Engine   | Notes                                  |
 |------------------------------|:---:|----------|-----------------------------------------|
-| Auto                          | off | Parakeet | model self-detects among its 28 codes  |
-| Pinned, in Parakeet's 28      | off | Parakeet | e.g. `da`, `en`, `sv`, `de`             |
+| Auto                          | off | Parakeet | self-detects; Danish rescued to Whisper (below) |
+| Pinned, Whisper-preferred     | off | Whisper  | `da` — Parakeet garbles Danish, Whisper doesn't |
+| Pinned, in Parakeet's 28      | off | Parakeet | e.g. `en`, `sv`, `de`                   |
 | Pinned, outside Parakeet's 28 | off | Whisper  | e.g. `no`, `ja`, `zh`, `ko`, `ar`       |
 | Any                            | on  | Whisper  | forces Whisper for every language      |
 
-When Parakeet reports low confidence in its own transcript (below 0.80, the
-telltale of it decoding e.g. Danish speech as English gibberish), the
-utterance is automatically re-run through Whisper with the pinned language
-forced, and Whisper's text is pasted instead. The first rescue after launch
-pays Whisper's load time (about 5-8 seconds, shown in the menu bar); later
-rescues cost only its inference. Every capture is also saved to
+On Auto, three rescue layers re-run Parakeet output through Whisper when the
+transcript deserves better (the log and CLI JSON carry which one fired):
+
+- **Confidence** — Parakeet below 0.80 is the telltale of a wrong-language
+  decode (Danish speech as English gibberish); the whole utterance re-runs
+  through Whisper with the pinned language forced.
+- **Language** — the transcript *reads* as Danish (text language ID): Parakeet
+  is confidently mediocre at Danish, so the utterance re-runs through Whisper
+  pinned to `da`. This is what makes Auto-mode Danish come out right.
+- **Code-switch** — the transcript (or a per-segment scan at the VAD's pause
+  boundaries) mixes Danish with another language: each pause-separated segment
+  is routed by its own language, Danish runs through Whisper, the rest keeps
+  Parakeet, and the pieces are joined in spoken order. Pause about a second
+  when you switch language mid-dictation and each half comes out in its own
+  language, correctly.
+
+Whisper is pre-loaded in the background at launch so rescues cost only its
+inference (1-2 s), not a model load; set `LOCAL_DICTATION_PRELOAD_WHISPER=0`
+to keep it lazy (~1.5 GB residency saved, first rescue pays ~5-8 s). Every
+capture is also saved to
 `~/Library/Caches/local-dictation/last-utterance.wav` (one file, overwritten,
 never leaves the machine) so a bad transcript can be replayed through both
 engines with the real audio; set `LOCAL_DICTATION_SAVE_AUDIO=0` to disable.
@@ -161,14 +176,17 @@ Exit codes:
 | 2    | model load / transcription error                          |
 | 3    | dropped by the gate (`tooShort`/`silence`) or the hallucination filter (reason on stderr) |
 
-`--json` emits `{"text","engine","language","gate","filtered","latencyMs"}` on
-stdout (the `engine` key is omitted when the utterance was dropped before any
-engine ran); without it, stdout carries only the plain transcript on success
-(or nothing on a drop) so it stays pipeable, and a one-line summary always
-goes to stderr. `scripts/make-fixtures.sh` generates local `say`-synthesized
-Danish/English fixtures plus a digital-silence WAV; `scripts/test-cli.sh`
-exercises all three exit paths (Parakeet, forced Whisper, gated silence)
-against the release binary; see that script for the exact invocations.
+`--json` emits
+`{"text","engine","language","gate","filtered","rescued","rescue","latencyMs"}`
+on stdout (the `engine` key is omitted when the utterance was dropped before
+any engine ran; `rescue` says which rescue layer fired, when one did); without
+it, stdout carries only the plain transcript on success (or nothing on a drop)
+so it stays pipeable, and a one-line summary always goes to stderr.
+`scripts/make-fixtures.sh` generates local `say`-synthesized Danish/English
+fixtures plus a digital-silence WAV; `scripts/test-cli.sh` exercises the exit
+paths (routed Whisper for Danish, routed Parakeet for English, forced engine,
+gated silence) against the release binary; see that script for the exact
+invocations.
 
 ## Choosing a different model
 
