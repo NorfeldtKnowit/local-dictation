@@ -4,6 +4,8 @@
 # Requires the real fixtures from `scripts/make-fixtures.sh` (Tests/fixtures/,
 # gitignored) and the Parakeet v3 + Whisper large-v3 models already downloaded
 # and cached (see CLAUDE.md — cold load is 3-4 min, this script assumes warm).
+# Every transcription run passes --no-polish so the assertions see raw-ASR
+# output deterministically, regardless of the host's Apple Intelligence state.
 # Not part of `swift test` / default CI: it shells out to the real release
 # binary and loads real on-device models, matching C11's "nightly/manual"
 # split from the unit-test suite.
@@ -35,22 +37,24 @@ fail() {
 #    Whisper WITHOUT --engine. Case-insensitive word check on JSON output;
 #    "Hej" is the fixture's opening word.
 echo "-- danish -> whisper (routed) --"
-DA_JSON="$($BIN --transcribe-file "$FIXTURES/da.aiff" --language da --json)"
+DA_JSON="$($BIN --transcribe-file "$FIXTURES/da.aiff" --language da --json --no-polish)"
 echo "$DA_JSON"
 echo "$DA_JSON" | grep -qi '"hej' || fail "Danish transcript missing expected word 'hej'"
 echo "$DA_JSON" | grep -q '"engine":"whisper"' || fail "Danish fixture did not route to whisper"
+echo "$DA_JSON" | grep -q '"polished":false' || fail "--no-polish did not suppress the polish stage"
 
 # 2. English fixture, pinned "en" routes to Parakeet (the low-latency default) —
 #    together with #1 this covers both engines through the ROUTER, not --engine.
 echo "-- english -> parakeet (routed) --"
-EN_JSON="$($BIN --transcribe-file "$FIXTURES/en.aiff" --language en --json)"
+EN_JSON="$($BIN --transcribe-file "$FIXTURES/en.aiff" --language en --json --no-polish)"
 echo "$EN_JSON"
 echo "$EN_JSON" | grep -qi "hello" || fail "English transcript missing expected word 'hello'"
 echo "$EN_JSON" | grep -q '"engine":"parakeet"' || fail "English fixture did not route to parakeet"
+echo "$EN_JSON" | grep -q '"polished":false' || fail "--no-polish did not suppress the polish stage"
 
 # 2b. --engine override still bypasses the router (forced-engine contract).
 echo "-- english -> whisper (forced) --"
-EN_OUT="$($BIN --transcribe-file "$FIXTURES/en.aiff" --engine whisper --language en)"
+EN_OUT="$($BIN --transcribe-file "$FIXTURES/en.aiff" --engine whisper --language en --no-polish)"
 echo "$EN_OUT"
 echo "$EN_OUT" | grep -qi "hello" || fail "English (whisper) transcript missing expected word 'hello'"
 
