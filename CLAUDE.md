@@ -37,9 +37,17 @@ transcribe → inject:
 - `ParakeetEngine.swift` — FluidAudio Parakeet TDT v3 (low-latency default).
 - `Transcriber.swift` — WhisperKit wrapper, conforms to `TranscriptionEngine`.
 - `HallucinationFilter.swift` — pure post-ASR blocklist + repetition guard.
+- `FillerFilter.swift` — pure standalone-filler strip (uh/um/erm, øh/øhm/ehm),
+  whole-token matches only; runs after the hallucination filter.
+- `TranscriptPolisher.swift` — actor: optional layer-4 LLM rewrite on Apple
+  FoundationModels behind the `TranscriptPolishing` seam; no-ops gracefully
+  when Apple Intelligence is unavailable.
+- `TranscriptPolisherLogic.swift` — pure polish instructions + accept
+  guardrails (length ratio, no added newlines, language-flip reject).
 - `DictationPipeline.swift` — actor tying gate → route → transcribe → filter
-  together; the single reuse point for both GUI and CLI.
-- `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy mode.
+  → polish together; the single reuse point for both GUI and CLI.
+- `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy
+  mode + polish toggle.
 - `UtteranceStateMachine.swift` — pure recording/transcription bookkeeping
   with monotonic IDs.
 - `PasteSequencer.swift` — pure paste ordering: flushes outcomes in strict
@@ -214,6 +222,42 @@ otherwise pay the ~5-8 s warm load mid-dictation; `warmUp`, not just
 LaunchAgent plist to keep it lazy and save ~1.5 GB residency. Once resident,
 rescues cost only Whisper inference (about 1-2 s).
 
+## Post-ASR text stages: filler strip + transcript polish (layer 4)
+
+Transcript order inside `DictationPipeline.process`:
+`raw ASR → HallucinationFilter → FillerFilter → (optional) TranscriptPolisher`.
+`--no-hallucination-filter` bypasses BOTH deterministic filters (its contract
+is "raw ASR text"); `--no-polish` / the menu's "Polish Transcript" checkbox
+(default on, persisted like Accuracy Mode) control only the LLM stage.
+
+- **FillerFilter** is pure and always safe: whole-token matches only, so
+  Danish "er" (a filler-looking real word), "serum", "uh-huh" are never
+  touched. It repairs only the punctuation the filler itself dragged in
+  (pause-comma pairs, sentence-final terminators, leading capital hand-off).
+- **TranscriptPolisher** runs Apple's on-device Foundation model
+  (`FoundationModels`, macOS 26+) with instructions + guardrails in
+  `TranscriptPolisherLogic` (pure, unit-tested). Non-negotiables, all encoded
+  as tests: a decline (model unavailable, error, 6 s `AsyncTimeout.run`
+  breach, guardrail reject) ALWAYS keeps the filtered ASR text; gated /
+  filter-suppressed / empty outcomes are never polished; accepted rewrites
+  must stay within 0.3-1.3x of the raw length, add no newlines, and keep the
+  dominant language (`nb` folds into `da`, same convention as the router).
+  Every accepted rewrite logs the pre-polish text, so the raw ASR output is
+  always recoverable from the log.
+- **Fresh `LanguageModelSession` per utterance** — session context
+  accumulates, and one utterance must never leak into the next (privacy +
+  drift). Greedy sampling for determinism; the model weights stay resident
+  across sessions, so per-session cost is negligible.
+- **Apple Intelligence must be enabled** (System Settings → Apple
+  Intelligence & Siri) or `SystemLanguageModel.default.availability` reports
+  `.unavailable(appleIntelligenceNotEnabled)` and the stage is inert; the
+  once-per-process log line `polish inactive: …` is the tell. The package
+  platform stays macOS 14 — all FoundationModels usage sits behind
+  `#if canImport(FoundationModels)` + `#available(macOS 26.0, *)`.
+- Spike-harness gotcha for measuring prompts against the raw model: a
+  single-file CLI needs `xcrun swiftc -O -parse-as-library` (plain `swiftc`
+  rejects `@main` in a one-file build without that flag).
+
 ### Debugging bad transcripts: the last utterance is on disk
 
 Synthesized `say` fixtures proved misleading for real-speech quality, so the
@@ -223,8 +267,12 @@ dictation, replay the actual audio through either engine:
 
 ```bash
 .build/release/local-dictation --transcribe-file \
-  ~/Library/Caches/local-dictation/last-utterance.wav --language da --json
+  ~/Library/Caches/local-dictation/last-utterance.wav \
+  --language da --no-polish --json
 ```
+
+(`--no-polish` because an A/B replay is about the ENGINE's output; letting
+the LLM polish rewrite it would blur what you are comparing.)
 
 Opt out by setting `LOCAL_DICTATION_SAVE_AUDIO=0` in the LaunchAgent plist.
 
@@ -298,7 +346,7 @@ at the deadline (regression-tested in `AsyncTimeoutTests`).
   after a VAD fail-open) and needs Parakeet v3 + Whisper large-v3 already cached
   locally. Treat it as manual/nightly, not part of `swift test`.
 - CLI mode (`--transcribe-file <path> [--engine …] [--language …] [--accuracy]
-  [--no-vad-gate] [--no-hallucination-filter] [--json]`) constructs no
+  [--no-vad-gate] [--no-hallucination-filter] [--no-polish] [--json]`) constructs no
   `AudioRecorder`/`HotkeyMonitor`/`MenuBar`/`NSApp`; it requests zero TCC
   permissions, so it's safe to run from CI or scripts on a machine that has
   never granted this app anything. Exit codes: `0` transcript emitted, `1` bad

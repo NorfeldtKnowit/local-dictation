@@ -23,6 +23,9 @@ Whisper model so it works in any app and never sends audio off the machine.
     or when Accuracy Mode is on
 - FluidAudio Silero VAD: pre-ASR speech gate, trims silence and drops
   no-speech taps before any model runs
+- Post-ASR text stages: hallucination blocklist, deterministic filler strip
+  (uh/um/øh/øhm), and an optional LLM transcript polish on Apple's on-device
+  Foundation model (see below)
 - `NSPasteboard` + synthetic Cmd+V for text injection
 - LaunchAgent for always-on daemon behavior
 
@@ -76,6 +79,32 @@ up or transcribe, you get an error, never a different engine's output
 pretending to be the one you asked for. The one exception is a Parakeet
 launch failure, which flips a `forceWhisper` override (equivalent to Accuracy
 Mode) since Whisper is a safe universal superset.
+
+## Transcript cleanup (filler strip + AI polish)
+
+After the hallucination filter, two cleanup stages run on the transcript:
+
+- **Filler strip** (always on, deterministic): standalone hesitation fillers
+  (`uh`, `um`, `erm`; Danish `øh`, `øhm`, `ehm`) are removed, whole-token
+  matches only — "serum", "uh-huh" and Danish "er" are never touched. The
+  pause-commas a filler drags in go with it ("I want to, uh, refactor" →
+  "I want to refactor").
+- **Polish Transcript** (menu toggle, on by default): the transcript is
+  rewritten by Apple's on-device Foundation model to repair misrecognized
+  words from context ("canorical" → "canonical", "citation quality" →
+  "dictation quality"), collapse stutters and false starts, and drop
+  residual fillers. Fully local, like everything else.
+
+Polish can only ever upgrade an utterance, never lose one: the rewrite is
+discarded (raw text pasted) if the model is unavailable, times out (6 s
+ceiling), returns something empty, much longer/shorter, multi-line, or in a
+different language than it was given. Every accepted rewrite logs the
+original ASR text so nothing is unrecoverable.
+
+**Requires Apple Intelligence** (System Settings → Apple Intelligence &
+Siri) on macOS 26+. When it's off, the toggle stays functional but inert —
+the log shows `polish inactive: … (appleIntelligenceNotEnabled)` once and
+dictation behaves exactly as before.
 
 ## Quick start
 
@@ -154,8 +183,9 @@ See `CLAUDE.md` for the full permissions playbook.
 Running the binary with `--transcribe-file` skips the GUI entirely: no
 `NSApplication`, no menu-bar item, no Microphone/Accessibility/Input
 Monitoring prompts. It transcribes one audio file through the exact same
-`DictationPipeline` the GUI uses (gate → route → transcribe → filter) and
-exits with a status code, which makes it safe to call from CI or scripts.
+`DictationPipeline` the GUI uses (gate → route → transcribe → filter →
+polish) and exits with a status code, which makes it safe to call from CI
+or scripts.
 
 ```bash
 local-dictation --transcribe-file <path>
@@ -163,7 +193,8 @@ local-dictation --transcribe-file <path>
                 [--language <iso>|auto]            # default auto
                 [--accuracy]                       # force Whisper, all languages
                 [--no-vad-gate]                     # bypass the silence/speech gate
-                [--no-hallucination-filter]         # bypass the post-ASR blocklist
+                [--no-hallucination-filter]         # bypass blocklist + filler strip
+                [--no-polish]                       # skip the LLM transcript polish
                 [--json]                            # machine-readable stdout
 ```
 
@@ -177,9 +208,10 @@ Exit codes:
 | 3    | dropped by the gate (`tooShort`/`silence`) or the hallucination filter (reason on stderr) |
 
 `--json` emits
-`{"text","engine","language","gate","filtered","rescued","rescue","latencyMs"}`
+`{"text","engine","language","gate","filtered","rescued","rescue","polished","latencyMs"}`
 on stdout (the `engine` key is omitted when the utterance was dropped before
-any engine ran; `rescue` says which rescue layer fired, when one did); without
+any engine ran; `rescue` says which rescue layer fired, when one did;
+`polished` is true iff the LLM polish rewrote the text); without
 it, stdout carries only the plain transcript on success (or nothing on a drop)
 so it stays pipeable, and a one-line summary always goes to stderr.
 `scripts/make-fixtures.sh` generates local `say`-synthesized Danish/English
@@ -278,7 +310,7 @@ check rather than default CI.
 | File | Purpose |
 |------|---------|
 | `Sources/LocalDictation/App.swift` | `@main` entry point (async, branches to CLI or GUI), app delegate, watchdogs |
-| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode |
+| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode, Polish Transcript |
 | `Sources/LocalDictation/HotkeyMonitor.swift` | `CGEventTap` watching Right Option; `isDown` delegates to `HotkeyStateMachine` |
 | `Sources/LocalDictation/HotkeyStateMachine.swift` | Pure press/release/tap-disabled state machine (unit tested) |
 | `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 (frozen since the Float32 output pin `1ee728e`; do not modify) |
@@ -286,11 +318,14 @@ check rather than default CI.
 | `Sources/LocalDictation/ParakeetEngine.swift` | FluidAudio Parakeet TDT v3 engine (low-latency default) |
 | `Sources/LocalDictation/TranscriptionEngine.swift` | `EngineKind` + the shared engine protocol |
 | `Sources/LocalDictation/EngineRouter.swift` | Pure language/Accuracy-Mode → engine routing decision |
-| `Sources/LocalDictation/LanguageSetting.swift` | `UserDefaults`-backed language pin + Accuracy Mode toggle |
+| `Sources/LocalDictation/LanguageSetting.swift` | `UserDefaults`-backed language pin + Accuracy Mode + Polish Transcript toggles |
 | `Sources/LocalDictation/SpeechGate.swift` | Actor over FluidAudio's Silero VAD; degrades gracefully if unavailable |
 | `Sources/LocalDictation/SpeechGateLogic.swift` | Pure gate decision + speech-region trimming (unit tested, no models) |
 | `Sources/LocalDictation/HallucinationFilter.swift` | Pure post-ASR blocklist + repetition-loop guard |
-| `Sources/LocalDictation/DictationPipeline.swift` | Actor: gate → route → transcribe → filter (single reuse point, GUI + CLI) |
+| `Sources/LocalDictation/FillerFilter.swift` | Pure standalone-filler strip (en + da), whole-token only |
+| `Sources/LocalDictation/TranscriptPolisher.swift` | Actor: LLM polish on Apple FoundationModels; graceful no-op when unavailable |
+| `Sources/LocalDictation/TranscriptPolisherLogic.swift` | Pure polish instructions + accept guardrails (unit tested, no model) |
+| `Sources/LocalDictation/DictationPipeline.swift` | Actor: gate → route → transcribe → filter → polish (single reuse point, GUI + CLI) |
 | `Sources/LocalDictation/UtteranceStateMachine.swift` | Pure recording/transcription bookkeeping with monotonic IDs |
 | `Sources/LocalDictation/PasteSequencer.swift` | Pure paste ordering: strict utterance-ID order, >= 300 ms between pastes |
 | `Sources/LocalDictation/LostReleaseWatchdog.swift` | Pure watchdog decision: re-arm on genuine hold vs end on lost release |
