@@ -190,17 +190,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 utterance.engineReady = true
                 Log.info("model ready", "app")
                 menuBar.update(.idle)
-                // Pre-DOWNLOAD (not load) the Whisper model in the background so
-                // the first Whisper-routed utterance never downloads ~1.5 GB
-                // mid-dictation (or fails offline). Low priority, best-effort:
-                // a failure only logs — the lazy download inside warmUp() stays
-                // as the fallback. GUI-only by construction (this is the
-                // menu-bar launch path; the CLI never runs this code).
+                // Pre-download AND pre-load Whisper in the background. Danish
+                // (a daily language here) now quality-routes to Whisper, so its
+                // model is no longer a rare fallback: without a pre-load the
+                // first Danish utterance of the day pays the ~5 s Core ML load
+                // mid-dictation. Costs ~1.5 GB residency; opt out of the load
+                // (keeping the download) with LOCAL_DICTATION_PRELOAD_WHISPER=0
+                // in the LaunchAgent plist. Low priority, best-effort: a
+                // failure only logs — the lazy load inside warmUp() stays as
+                // the fallback. GUI-only by construction (this is the menu-bar
+                // launch path; the CLI never runs this code).
                 Task.detached(priority: .background) { [whisper] in
                     do {
                         try await whisper.predownloadModel()
+                        guard ProcessInfo.processInfo.environment["LOCAL_DICTATION_PRELOAD_WHISPER"] != "0" else { return }
+                        try await whisper.warmUp()
+                        Log.info("whisper pre-loaded and resident (set LOCAL_DICTATION_PRELOAD_WHISPER=0 to keep it lazy)", "whisper")
                     } catch {
-                        Log.warn("whisper model pre-download failed (will download lazily on first use): \(error)", "whisper")
+                        Log.warn("whisper pre-load failed (will load lazily on first use): \(error)", "whisper")
                     }
                 }
             } catch {
