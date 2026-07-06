@@ -34,10 +34,20 @@ protocol GateProviding: Sendable {
 actor SpeechGate: GateProviding {
     /// Result of gating one utterance. `audio` is the buffer to hand to ASR
     /// (trimmed to speech on `.pass`, the raw buffer when VAD is unavailable,
-    /// and empty when the utterance was dropped).
+    /// and empty when the utterance was dropped). `segments` carries the same
+    /// speech as `audio` but split at the VAD's silence boundaries — the cut
+    /// points the pipeline's code-switching path routes per segment. Only a
+    /// `.pass` populates it; fail-open paths have no boundary information.
     struct Outcome: Sendable {
         let decision: GateDecision
         let audio: [Float]
+        let segments: [[Float]]
+
+        init(decision: GateDecision, audio: [Float], segments: [[Float]] = []) {
+            self.decision = decision
+            self.audio = audio
+            self.segments = segments
+        }
     }
 
     /// nil until `warmUp()` succeeds, and *stays* nil if the model failed to
@@ -56,16 +66,22 @@ actor SpeechGate: GateProviding {
     /// Segmentation tuning. Two fields deviate from the library defaults where
     /// those defaults hurt push-to-talk dictation; the rest are restated at
     /// their defaults for clarity/pinning:
-    /// - `minSilenceDuration` 0.50 (lib 0.75): the default merges natural
-    ///   between-sentence pauses into one giant segment; 0.50 keeps regions
-    ///   distinct without chopping mid-word.
+    /// - `minSilenceDuration` 0.25 (lib 0.75): the VAD's hop is 4096 samples
+    ///   (0.256 s) and a segment only closes at a *silent* frame whose start is
+    ///   >= minSilenceDuration past the silence start, so the configured value
+    ///   quantizes UP to whole frames: 0.25 needs 2 fully-silent frames — about
+    ///   a 0.6-0.8 s real pause once boundary frames (half speech, half
+    ///   silence) are accounted for. The previous 0.50 needed 3, i.e. a ~1.2 s
+    ///   pause, which merged the natural pause at a language switch into one
+    ///   segment and starved the code-switch path of cut points (measured: a
+    ///   0.8 s scripted gap did not split at 0.50, did at 0.25).
     /// - `speechPadding` 0.15 (lib 0.10): a little extra pad protects soft
     ///   onsets and trailing plosives from being clipped off by the trim.
     /// (`speechPadding` must be <= `minSpeechDuration` — the library asserts it —
     /// so both sit at 0.15.)
     static let segConfig = VadSegmentationConfig(
         minSpeechDuration: 0.15,
-        minSilenceDuration: 0.50,
+        minSilenceDuration: 0.25,
         maxSpeechDuration: 14.0,
         speechPadding: 0.15,
         silenceThresholdForSplit: 0.30
@@ -104,7 +120,10 @@ actor SpeechGate: GateProviding {
             // `decide` only returns `.pass` when `segments` was non-nil and met
             // the speech floor; `?? []` keeps this total (no force-unwrap) while
             // trimming to the padded speech regions.
-            return Outcome(decision: .pass, audio: SpeechGateLogic.trim(samples, segments: segments ?? []))
+            let buffers = SpeechGateLogic.segmentBuffers(samples, segments: segments ?? [])
+            Log.debug("gate pass: \(buffers.count) segment(s) "
+                    + "[\(buffers.map { String(format: "%.1fs", Double($0.count) / Double(SpeechGateLogic.sampleRate)) }.joined(separator: ", "))]", "vad")
+            return Outcome(decision: .pass, audio: buffers.flatMap { $0 }, segments: buffers)
         case .vadUnavailable:
             return Outcome(decision: .vadUnavailable, audio: samples)
         case .tooShort, .silence:

@@ -30,16 +30,25 @@ enum SpeechGateLogic {
         return speech >= minSpeechSeconds ? .pass : .silence
     }
 
+    /// The padded speech regions as separate buffers, in spoken order. These
+    /// are the cut points the pipeline's code-switching path routes per
+    /// segment; `trim` (below) is their concatenation. Segment bounds are
+    /// clamped into `samples` so a rounding overshoot can't crash; a fully
+    /// out-of-range segment yields an empty buffer rather than being dropped,
+    /// keeping indices aligned with the VAD's segment list.
+    static func segmentBuffers(_ samples: [Float], segments: [VadSegment]) -> [[Float]] {
+        segments.map { seg -> [Float] in
+            let s = max(0, min(seg.startSample(sampleRate: sampleRate), samples.count))
+            let e = max(s, min(seg.endSample(sampleRate: sampleRate), samples.count))
+            return Array(samples[s..<e])
+        }
+    }
+
     /// Concatenate the padded speech regions into one buffer, dropping the
     /// silence between/around them (the single highest-leverage Whisper
     /// anti-ghost measure; also shrinks the ASR input). Padding is already
-    /// applied by `VadSegmentationConfig.speechPadding`. Segment bounds are
-    /// clamped into `samples` so a rounding overshoot can't crash.
+    /// applied by `VadSegmentationConfig.speechPadding`.
     static func trim(_ samples: [Float], segments: [VadSegment]) -> [Float] {
-        segments.flatMap { seg -> ArraySlice<Float> in
-            let s = max(0, min(seg.startSample(sampleRate: sampleRate), samples.count))
-            let e = max(s, min(seg.endSample(sampleRate: sampleRate), samples.count))
-            return samples[s..<e]
-        }
+        segmentBuffers(samples, segments: segments).flatMap { $0 }
     }
 }
