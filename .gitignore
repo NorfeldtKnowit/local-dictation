@@ -5,3 +5,6 @@ Package.resolved
 *.xcodeproj/
 dist/
 Tests/fixtures/
+
+# Real-voice debugging fixtures (user's actual speech; never commit/push)
+fixtures-real/
