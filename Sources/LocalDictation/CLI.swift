@@ -206,7 +206,7 @@ enum CLIRunner {
             stderr("dropped: \(dropReason)")
         }
         stderr("cli done: engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate.rawValue) "
-             + "filtered=\(outcome.filtered) rescued=\(outcome.rescued) "
+             + "filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") "
              + "latencyMs=\(Int(outcome.inferenceSeconds * 1000)) exit=\(exitCode)")
         return exitCode
     }
@@ -223,6 +223,10 @@ enum CLIRunner {
             let gate: String
             let filtered: Bool
             let rescued: Bool
+            /// Why a rescue re-ran (confidence | language | code-switch);
+            /// omitted when `rescued` is false. Additive — `rescued` stays a
+            /// Bool so existing consumers keep parsing.
+            let rescue: String?
             let latencyMs: Int
         }
         let payload = Payload(
@@ -232,6 +236,7 @@ enum CLIRunner {
             gate: outcome.gate.rawValue,
             filtered: outcome.filtered,
             rescued: outcome.rescued,
+            rescue: outcome.rescue?.rawValue,
             latencyMs: Int(outcome.inferenceSeconds * 1000)
         )
         let encoder = JSONEncoder()

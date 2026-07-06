@@ -357,7 +357,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     )
                 }
                 utterance.settled(id)
-                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescued) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
+                Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
                 // Never paste directly: the sequencer restores spoken order for
                 // overlapping utterances (an empty text still advances the queue).
                 pasteSequencer.complete(id: id, text: outcome.text)

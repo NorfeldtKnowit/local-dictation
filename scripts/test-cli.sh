@@ -30,17 +30,25 @@ fail() {
     exit 1
 }
 
-# 1. Danish fixture, routed to Parakeet (default engine for "da"), case-insensitive
-#    word check on JSON output. "Hej" is the fixture's opening word.
-echo "-- danish -> parakeet --"
+# 1. Danish fixture: "da" is whisper-preferred (EngineRouter.whisperPreferred —
+#    Parakeet garbles Danish at high confidence), so the pin must route to
+#    Whisper WITHOUT --engine. Case-insensitive word check on JSON output;
+#    "Hej" is the fixture's opening word.
+echo "-- danish -> whisper (routed) --"
 DA_JSON="$($BIN --transcribe-file "$FIXTURES/da.aiff" --language da --json)"
 echo "$DA_JSON"
 echo "$DA_JSON" | grep -qi '"hej' || fail "Danish transcript missing expected word 'hej'"
-echo "$DA_JSON" | grep -q '"engine":"parakeet"' || fail "Danish fixture did not route to parakeet"
+echo "$DA_JSON" | grep -q '"engine":"whisper"' || fail "Danish fixture did not route to whisper"
 
-# 2. English fixture, forced through Whisper via --engine (dual-engine coverage;
-#    the default router would also pick Parakeet for "en", so this exercises the
-#    --engine override path specifically).
+# 2. English fixture, pinned "en" routes to Parakeet (the low-latency default) —
+#    together with #1 this covers both engines through the ROUTER, not --engine.
+echo "-- english -> parakeet (routed) --"
+EN_JSON="$($BIN --transcribe-file "$FIXTURES/en.aiff" --language en --json)"
+echo "$EN_JSON"
+echo "$EN_JSON" | grep -qi "hello" || fail "English transcript missing expected word 'hello'"
+echo "$EN_JSON" | grep -q '"engine":"parakeet"' || fail "English fixture did not route to parakeet"
+
+# 2b. --engine override still bypasses the router (forced-engine contract).
 echo "-- english -> whisper (forced) --"
 EN_OUT="$($BIN --transcribe-file "$FIXTURES/en.aiff" --engine whisper --language en)"
 echo "$EN_OUT"

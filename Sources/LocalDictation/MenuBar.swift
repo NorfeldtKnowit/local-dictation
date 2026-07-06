@@ -26,7 +26,9 @@ final class MenuBar {
 
     /// Whisper-only pins offered below the Parakeet set. Norwegian is here on
     /// purpose: FluidAudio's `Language` enum has no "no"/"nb", so Norwegian must
-    /// route to Whisper (see `EngineRouter`).
+    /// route to Whisper (see `EngineRouter`). The Whisper section additionally
+    /// gets `EngineRouter.whisperPreferred` (Danish) prepended at build time —
+    /// languages Parakeet supports but Whisper transcribes materially better.
     private static let whisperOnlyCodes = ["no", "ja", "zh", "ko", "ar"]
 
     /// Rotating SF Symbol shown (in Naples yellow) while Whisper transcribes.
@@ -119,22 +121,25 @@ final class MenuBar {
         auto.representedObject = "auto"
         // Known accepted limitation (documented here rather than papered over):
         // Auto detects only among Parakeet's 28; other languages need a pin.
-        auto.toolTip = "Detects among Parakeet's 28 languages. For Norwegian, Japanese, Chinese, "
-                     + "Korean or Arabic, pin the language below or enable Accuracy Mode."
+        // (Danish IS auto-detected — from the transcript — and re-routed to
+        // Whisper for quality, including mid-utterance Danish/English mixing.)
+        auto.toolTip = "Detects among Parakeet's languages; Danish is re-routed to Whisper "
+                     + "automatically. For Norwegian, Japanese, Chinese, Korean or Arabic, "
+                     + "pin the language below or enable Accuracy Mode."
         languageMenu.addItem(auto)
         languageMenu.addItem(.separator())
 
-        // EngineRouter.parakeetLanguages is the routing source of truth (derived
-        // from FluidAudio's Language enum); building the submenu from it keeps
-        // the menu and the router incapable of drifting apart.
-        for code in Self.displaySorted(Array(EngineRouter.parakeetLanguages)) {
+        // EngineRouter is the routing source of truth (derived from FluidAudio's
+        // Language enum minus the Whisper-preferred set); building the submenu
+        // from it keeps the menu and the router incapable of drifting apart.
+        for code in Self.displaySorted(Array(EngineRouter.parakeetMenuLanguages)) {
             languageMenu.addItem(languageItem(code: code))
         }
 
         languageMenu.addItem(.separator())
         // nil action → AppKit auto-disables it: a section header, not a choice.
         languageMenu.addItem(NSMenuItem(title: "Other (Whisper)", action: nil, keyEquivalent: ""))
-        for code in Self.whisperOnlyCodes {
+        for code in Self.displaySorted(Array(EngineRouter.whisperPreferred)) + Self.whisperOnlyCodes {
             languageMenu.addItem(languageItem(code: code))
         }
     }

@@ -28,10 +28,29 @@ actor DictationPipeline {
         let filtered: Bool
         /// Wall-clock seconds spent inside `engine.transcribe` (0 when gated out).
         let inferenceSeconds: Double
-        /// True iff Parakeet's transcript was discarded for a Whisper re-run
-        /// because its confidence fell below the rescue threshold (`engine` is
-        /// then `.whisper` — the engine whose text was actually used).
-        var rescued: Bool = false
+        /// Non-nil iff Parakeet's transcript was (partly) discarded for a
+        /// Whisper re-run; says why. `engine` is then `.whisper` — the engine
+        /// whose text was (at least partly) used.
+        var rescue: RescueReason? = nil
+        /// Convenience for logs / JSON consumers that only care whether any
+        /// rescue happened.
+        var rescued: Bool { rescue != nil }
+    }
+
+    /// Why an auto-routed Parakeet transcript was re-run through Whisper.
+    enum RescueReason: String, Sendable {
+        /// Parakeet's token confidence fell below the rescue threshold — the
+        /// signature of a wrong-language decode (e.g. Danish audio decoded as
+        /// English gibberish).
+        case confidence
+        /// The transcript READ as a Whisper-preferred language (Danish) even
+        /// though confidence was high: Parakeet is confidently mediocre at
+        /// those, so the whole buffer re-ran through Whisper pinned to it.
+        case language
+        /// The transcript mixed a Whisper-preferred language with others; the
+        /// utterance was re-transcribed per VAD segment, with the preferred-
+        /// language runs re-run through Whisper (code-switching).
+        case codeSwitch = "code-switch"
     }
 
     /// Parakeet confidence at/above which its transcript is trusted as-is.
@@ -135,7 +154,7 @@ actor DictationPipeline {
         let t0 = Date()
         var result = try await engine.transcribe(samples: gated.audio, language: hint)
         var usedKind = kind
-        var rescued = false
+        var rescue: RescueReason? = nil
 
         // Confidence rescue. Parakeet v3 cannot be *forced* to a language — its
         // `language:` hint is only a script filter, and e.g. Danish vs English
@@ -149,13 +168,69 @@ actor DictationPipeline {
            let confidence = result.confidence, confidence < rescueConfidence {
             Log.warn("parakeet confidence \(String(format: "%.2f", confidence)) < \(String(format: "%.2f", rescueConfidence)) — rescuing with whisper", "pipeline")
             do {
-                if await !whisper.isWarmedUp { onColdLoad?(.whisper) }
-                try await whisper.warmUp()
+                try await warmWhisper(onColdLoad: onColdLoad)
                 result = try await whisper.transcribe(samples: gated.audio, language: hint)
                 usedKind = .whisper
-                rescued = true
+                rescue = .confidence
             } catch {
                 Log.error("whisper rescue failed — keeping parakeet transcript: \(error)", "pipeline")
+            }
+        }
+
+        // Language rescue. Confidence only reveals wrong-LANGUAGE decodes;
+        // Parakeet's within-language Danish errors score 0.93+, identical to
+        // clean output. The transcript itself is the remaining signal: if it
+        // READS as a Whisper-preferred language (sentence-level LID), re-run —
+        // whole-buffer when monolingual, per VAD segment when the utterance
+        // code-switches between a preferred language and something else.
+        // Auto-mode only: a pinned language already routed where the user chose.
+        if rescue == nil, forcedEngine == nil, kind == .parakeet, language == "auto" {
+            let weights = TextLanguageID.languageWeights(of: result.text)
+            switch EngineRouter.textRescuePlan(weights: weights, segmentCount: gated.segments.count) {
+            case .keep:
+                // A monolingual-looking transcript does NOT prove monolingual
+                // audio: Parakeet can silently DROP a whole sentence in the
+                // other language (observed: a Danish+English clip transcribed
+                // as only the English sentence at confidence 1.00), leaving no
+                // textual trace for the LID above. When the gate found real
+                // pause boundaries, spend one cheap Parakeet pass per segment
+                // to check each one; nil comes back when nothing preferred is
+                // found and the whole-buffer transcript stands.
+                if gated.segments.count >= 2 {
+                    do {
+                        if let text = try await codeSwitchTranscribe(segments: gated.segments,
+                                                                     onColdLoad: onColdLoad) {
+                            Log.warn("segment scan found whisper-preferred speech parakeet's whole-buffer transcript missed — code-switch rescue", "pipeline")
+                            result = EngineResult(text: text, confidence: nil)
+                            usedKind = .whisper
+                            rescue = .codeSwitch
+                        }
+                    } catch {
+                        Log.error("segment-scan rescue failed — keeping parakeet transcript: \(error)", "pipeline")
+                    }
+                }
+            case .wholeUtterance(let pin):
+                Log.warn("parakeet transcript reads as '\(pin)' (whisper-preferred) — re-running whole utterance through whisper", "pipeline")
+                do {
+                    try await warmWhisper(onColdLoad: onColdLoad)
+                    result = try await whisper.transcribe(samples: gated.audio, language: pin)
+                    usedKind = .whisper
+                    rescue = .language
+                } catch {
+                    Log.error("whisper language rescue failed — keeping parakeet transcript: \(error)", "pipeline")
+                }
+            case .perSegment(let pin):
+                Log.warn("parakeet transcript mixes '\(pin)' with other languages — re-transcribing \(gated.segments.count) segments (code-switch)", "pipeline")
+                do {
+                    if let text = try await codeSwitchTranscribe(segments: gated.segments,
+                                                                 onColdLoad: onColdLoad) {
+                        result = EngineResult(text: text, confidence: nil)
+                        usedKind = .whisper
+                        rescue = .codeSwitch
+                    }
+                } catch {
+                    Log.error("code-switch rescue failed — keeping parakeet transcript: \(error)", "pipeline")
+                }
             }
         }
         let inference = Date().timeIntervalSince(t0)
@@ -167,6 +242,55 @@ actor DictationPipeline {
         return Outcome(text: cleaned, engine: usedKind, gate: gated.decision,
                        filtered: cleaned.isEmpty && !raw.isEmpty,
                        inferenceSeconds: inference,
-                       rescued: rescued)
+                       rescue: rescue)
+    }
+
+    private func warmWhisper(onColdLoad: (@Sendable (EngineKind) -> Void)?) async throws {
+        if await !whisper.isWarmedUp { onColdLoad?(.whisper) }
+        try await whisper.warmUp()
+    }
+
+    /// Code-switching re-transcription: Parakeet each VAD segment to find its
+    /// language (its transcript carries the language even when the words are
+    /// garbled — and per-segment it cannot silently drop a sentence the way a
+    /// whole-buffer decode can), then merge consecutive whisper-preferred
+    /// segments into runs and re-run those runs' audio through Whisper pinned
+    /// to their language; other segments keep their Parakeet text (Parakeet is
+    /// the better engine for them, and Whisper would translate them).
+    /// Returns nil when no segment turned out to be whisper-preferred after
+    /// all (the caller keeps the original whole-buffer transcript —
+    /// re-segmented Parakeet text would be a lateral move with fresh join
+    /// artifacts).
+    private func codeSwitchTranscribe(segments: [[Float]],
+                                      onColdLoad: (@Sendable (EngineKind) -> Void)?) async throws -> String? {
+        var texts: [String] = []
+        var pins: [String?] = []   // Whisper pin for the segment; nil = keep Parakeet's text
+        for segment in segments {
+            let text = try await parakeet.transcribe(samples: segment, language: nil).text
+            texts.append(text)
+            let language = TextLanguageID.dominantLanguage(of: text)
+            pins.append(language.flatMap { EngineRouter.whisperPreferred.contains($0) ? $0 : nil })
+        }
+        guard pins.contains(where: { $0 != nil }) else { return nil }
+
+        try await warmWhisper(onColdLoad: onColdLoad)
+        var pieces: [String] = []
+        var i = 0
+        while i < segments.count {
+            if let pin = pins[i] {
+                // Merge the consecutive same-language run back into one buffer
+                // so Whisper decodes it with full context (one call, not N).
+                var audio: [Float] = []
+                while i < segments.count, pins[i] == pin {
+                    audio.append(contentsOf: segments[i])
+                    i += 1
+                }
+                pieces.append(try await whisper.transcribe(samples: audio, language: pin).text)
+            } else {
+                pieces.append(texts[i])
+                i += 1
+            }
+        }
+        return pieces.filter { !$0.isEmpty }.joined(separator: " ")
     }
 }
