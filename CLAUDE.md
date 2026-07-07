@@ -104,11 +104,11 @@ new app and silently drops every grant. Symptom: it worked, you rebuilt, now
 nothing works and re-toggling Settings doesn't help.
 
 Fix already in place: `build-app.sh` / `install-app.sh` / `sign.sh` sign with a
-real **Apple Development** certificate (default
-`LOCAL_DICTATION_SIGN_ID=5FA4A452E6583B1C54CA2F9C0CD563CAA77DAA0E`,
-team `9397MGXMJF`). With a stable cert the grants survive rebuilds. Do **not**
-revert these to `-`. Override the identity via the `LOCAL_DICTATION_SIGN_ID`
-env var if signing on another machine.
+real **Apple Development** certificate, resolved by `scripts/signing-id.sh`
+(the `LOCAL_DICTATION_SIGN_ID` env var if set, otherwise the keychain's first
+Apple Development cert — create one in Xcode → Settings → Accounts → Manage
+Certificates if the script errors out). With a stable cert the grants survive
+rebuilds. Do **not** revert these to `-`.
 
 ### Other permission traps
 
@@ -172,8 +172,8 @@ then filters; it is the single reuse point for both the GUI and the CLI
 
 `EngineRouter.whisperPreferred` (currently `{"da"}`) marks languages Parakeet
 nominally supports but transcribes measurably worse than Whisper. A/B on a
-real utterance (2026-07-06, `fixtures-real/danish-tech-utterance5.wav` —
-gitignored real-voice audio, exists locally only):
+real Danish utterance (2026-07-06, a gitignored `fixtures-real/` recording —
+real-voice audio never enters git; keep it that way):
 Parakeet produced "komet omskrivning af foreningen … starte forfar" at
 confidence **0.96**; Whisper pinned `da` produced the correct "komplet
 omskrivning af forgreningen … starte forfra". That 0.96 is the key fact —

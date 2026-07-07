@@ -143,9 +143,11 @@ and re-toggling the switch in System Settings does not fix it.
 
 The build scripts therefore sign with a **stable Apple Development
 certificate**, not ad-hoc. With a real cert the grants survive rebuilds, so you
-grant the three permissions once. Override the identity for another machine via
-the `LOCAL_DICTATION_SIGN_ID` env var (default is the maintainer's cert; set it
-to `-` to fall back to ad-hoc, accepting the re-grant-every-build pain):
+grant the three permissions once. `scripts/signing-id.sh` picks the keychain's
+Apple Development cert automatically (create one in Xcode → Settings →
+Accounts → Manage Certificates if you have none); override via the
+`LOCAL_DICTATION_SIGN_ID` env var (set it to `-` to fall back to ad-hoc,
+accepting the re-grant-every-build pain):
 
 ```bash
 LOCAL_DICTATION_SIGN_ID="<cert-sha1-or-name>" scripts/build-app.sh
@@ -337,7 +339,33 @@ check rather than default CI.
 | `scripts/build-app.sh` | Assemble + sign `dist/local-dictation.app` |
 | `scripts/install-app.sh` | Copy + sign the app into `~/Applications` |
 | `scripts/sign.sh` | Sign the raw `.build` binary (stable identity) |
+| `scripts/signing-id.sh` | Shared signing-identity resolution (sourced by the three scripts above) |
 | `scripts/install-daemon.sh` | Install LaunchAgent |
 | `scripts/uninstall-daemon.sh` | Remove LaunchAgent |
+
+## Acknowledgements
+
+This app stands on excellent open work:
+
+- [WhisperKit](https://github.com/argmaxinc/WhisperKit) by Argmax (MIT):
+  on-device Whisper inference via CoreML.
+- [FluidAudio](https://github.com/FluidInference/FluidAudio) by FluidInference
+  (Apache-2.0): CoreML runtime for Parakeet ASR and Silero VAD.
+- [Parakeet TDT v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by
+  NVIDIA (CC-BY-4.0): the low-latency multilingual ASR model.
+- [Whisper](https://github.com/openai/whisper) by OpenAI (MIT): the
+  accuracy-mode ASR model (large-v3-turbo).
+- [Silero VAD](https://github.com/snakers4/silero-vad) by Silero Team (MIT):
+  the voice-activity gate.
+- [swift-argument-parser](https://github.com/apple/swift-argument-parser) and
+  the FoundationModels framework by Apple.
+
+Model weights are downloaded at runtime from their upstream sources and are
+covered by their own licenses above; this repository contains no model weights.
+
+## License
+
+No license is granted; all rights reserved. If you would like to use, copy, or
+build on this code, please reach out and ask.
 | `scripts/make-fixtures.sh` | Generate `Tests/fixtures/` audio (Danish, English, silence) via `say` |
 | `scripts/test-cli.sh` | CLI e2e harness: Parakeet, forced Whisper, gated silence |
