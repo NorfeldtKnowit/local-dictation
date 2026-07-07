@@ -11,7 +11,7 @@ DST="$HOME/Applications/local-dictation.app"
 
 # Must match build-app.sh so the installed copy keeps the same code-signing
 # identity (and therefore the same TCC grants) across rebuilds.
-SIGN_ID="${LOCAL_DICTATION_SIGN_ID:-5FA4A452E6583B1C54CA2F9C0CD563CAA77DAA0E}"
+. "$ROOT/scripts/signing-id.sh"
 
 if [ ! -d "$SRC" ]; then
   echo "Source app not found at $SRC — run scripts/build-app.sh first." >&2

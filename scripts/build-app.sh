@@ -12,9 +12,9 @@ APP="$ROOT/dist/local-dictation.app"
 # Monitoring / Microphone grants across rebuilds. Ad-hoc ("-") changes the
 # binary's cdhash every build, so TCC treats each rebuild as a new app and
 # silently drops every grant. A real signing identity keys TCC on the
-# certificate, which survives rebuilds. Override with LOCAL_DICTATION_SIGN_ID,
-# or set it to "-" to fall back to ad-hoc.
-SIGN_ID="${LOCAL_DICTATION_SIGN_ID:-5FA4A452E6583B1C54CA2F9C0CD563CAA77DAA0E}"
+# certificate, which survives rebuilds. Resolution (env override or the
+# keychain's Apple Development cert) lives in signing-id.sh.
+. "$ROOT/scripts/signing-id.sh"
 
 if [ ! -f "$BIN" ]; then
   echo "Binary not found at $BIN — run 'swift build -c release' first." >&2

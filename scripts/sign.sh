@@ -15,9 +15,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/.build/release/local-dictation"
 
-# Stable signing identity (same default as build-app.sh / install-app.sh).
-# Override with LOCAL_DICTATION_SIGN_ID, or set it to "-" for ad-hoc.
-SIGN_ID="${LOCAL_DICTATION_SIGN_ID:-5FA4A452E6583B1C54CA2F9C0CD563CAA77DAA0E}"
+# Stable signing identity (same resolution as build-app.sh / install-app.sh).
+. "$ROOT/scripts/signing-id.sh"
 
 if [ ! -f "$BIN" ]; then
   echo "Binary not found at $BIN — run 'swift build -c release' first." >&2
