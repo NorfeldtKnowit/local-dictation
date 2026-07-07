@@ -232,10 +232,13 @@ final class MenuBar {
                 symbol = "arrow.down.circle"
                 title = what
             case .idle:
-                symbol = "mic"
+                // Deliberately NOT a mic: macOS itself shows a mic indicator in
+                // the menu bar while we record, so a mic here reads as a
+                // duplicate. The waveform is the app's own identity.
+                symbol = "waveform"
                 title = "Idle — hold Right Option to dictate"
             case .listening:
-                symbol = "mic.fill"
+                symbol = "waveform.circle.fill"
                 title = "Listening…"
                 tint = Self.naplesYellow
                 template = false
