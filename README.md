@@ -1,4 +1,4 @@
-# local-dictation
+# local-dictation (macOS)
 
 Universal push-to-talk dictation for macOS. Hold **Right Option** (or
 left-click the menu-bar icon), speak, release. The transcript is pasted into
@@ -394,6 +394,8 @@ check rather than default CI.
 | `scripts/signing-id.sh` | Shared signing-identity resolution (sourced by the three scripts above) |
 | `scripts/install-daemon.sh` | Install LaunchAgent |
 | `scripts/uninstall-daemon.sh` | Remove LaunchAgent |
+| `scripts/make-fixtures.sh` | Generate `Tests/fixtures/` audio (Danish, English, silence) via `say` |
+| `scripts/test-cli.sh` | CLI e2e harness: Parakeet, forced Whisper, gated silence |
 
 ## Acknowledgements
 
@@ -417,7 +419,12 @@ covered by their own licenses above; this repository contains no model weights.
 
 ## License
 
-No license is granted; all rights reserved. If you would like to use, copy, or
-build on this code, please reach out and ask.
-| `scripts/make-fixtures.sh` | Generate `Tests/fixtures/` audio (Danish, English, silence) via `say` |
-| `scripts/test-cli.sh` | CLI e2e harness: Parakeet, forced Whisper, gated silence |
+Released under the [MIT License](LICENSE). This app is glue: it stands on a
+lot of generously licensed open-source work (see Acknowledgements above), so it
+felt right to pass that forward and license the code that wires it all together
+into working dictation under the same open, permissive terms. Use it, copy it,
+build on it.
+
+Model weights are not covered by this license; they are downloaded at runtime
+from their upstream sources and remain under their own licenses (listed in
+Acknowledgements).
