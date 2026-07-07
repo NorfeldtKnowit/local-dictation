@@ -45,7 +45,11 @@ final class ReviewCoordinator {
 
     /// The polish stage settled (nil = decline/echo → nothing to review).
     func polishFinished(id: UInt64, polished: String?) {
-        run(logic.polishFinished(id: id, polished: polished))
+        let commands = logic.polishFinished(id: id, polished: polished)
+        if commands.contains(where: { if case .complete = $0 { return true }; return false }) {
+            Log.info("review: no usable rewrite — inserted raw directly id=\(id)", "review")
+        }
+        run(commands)
     }
 
     /// Applies from the next deadman arming; one already scheduled stands.

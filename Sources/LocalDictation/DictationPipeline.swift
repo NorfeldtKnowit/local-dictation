@@ -298,8 +298,16 @@ actor DictationPipeline {
                     style: PolishStyle,
                     onPartial: (@Sendable (String) -> Void)? = nil) async -> String? {
         guard !text.isEmpty, let polisher = reviewPolisher ?? polisher else { return nil }
-        guard let refined = await polisher.polish(text, style: style, onPartial: onPartial),
-              refined != text else { return nil }
+        guard let refined = await polisher.polish(text, style: style, onPartial: onPartial) else {
+            // Backends already logged WHY (reject reason / failure / inactive).
+            return nil
+        }
+        guard refined != text else {
+            // Without this line a clean transcript's review pass is invisible
+            // in the log and looks like review never ran.
+            Log.info("polish (\(style.rawValue)) echoed — transcript already clean", "polish")
+            return nil
+        }
         // The pre-polish ASR text must stay recoverable from the log.
         Log.info("polish (\(style.rawValue)) rewrote: \"\(text.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
         return refined
