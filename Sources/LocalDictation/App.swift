@@ -67,8 +67,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let whisper = Transcriber()
     private let gate = SpeechGate()
     private let polisher = TranscriptPolisher()
-    private lazy var pipeline = DictationPipeline(parakeet: parakeet, whisper: whisper, gate: gate,
-                                                  polisher: polisher)
+    /// Qwen via MLX — the polish backend for non-English utterances (Apple's
+    /// FM is English-only in practice). Reached ONLY through the review path,
+    /// where the HUD gives feedback during its slower cold spins.
+    private let mlxPolisher = MLXPolisher()
+    private lazy var pipeline = DictationPipeline(
+        parakeet: parakeet, whisper: whisper, gate: gate,
+        polisher: polisher,
+        reviewPolisher: RoutedPolisher(apple: polisher, mlx: mlxPolisher))
 
     /// Persisted language pin + Accuracy Mode; rendered by MenuBar, owned here.
     private let settings = LanguageSetting()
@@ -169,9 +175,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.settings.copyInsteadOfPaste = enabled
             Log.info("copy instead of paste: \(enabled)", "app")
         }
-        menuBar.onToggleReview = { [weak self] enabled in
+        menuBar.onToggleReview = { [weak self, mlxPolisher] enabled in
             self?.settings.reviewBeforePaste = enabled
             Log.info("review before paste: \(enabled)", "app")
+            // Review's TERSE candidate may route to the MLX model; page it in
+            // now (idempotent), not on the first Danish utterance.
+            if enabled { Task.detached(priority: .background) { await mlxPolisher.warmUp() } }
         }
         menuBar.onSelectReviewAutoInsert = { [weak self] code in
             self?.settings.reviewAutoInsert = code
@@ -244,6 +253,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // toggle is off or Apple Intelligence is unavailable.
                 if settings.polishTranscript {
                     Task.detached(priority: .background) { [polisher] in await polisher.warmUp() }
+                }
+                // With review mode on, non-English rewrites route to the MLX
+                // Qwen backend: pre-load it (one-time ~2.5 GB download, then
+                // ~3 GB resident) so the first Danish review doesn't pay the
+                // cold load. LOCAL_DICTATION_PRELOAD_QWEN=0 keeps it lazy.
+                if settings.polishTranscript, settings.reviewBeforePaste,
+                   ProcessInfo.processInfo.environment["LOCAL_DICTATION_PRELOAD_QWEN"] != "0" {
+                    Task.detached(priority: .background) { [mlxPolisher] in await mlxPolisher.warmUp() }
                 }
                 // Pre-download AND pre-load Whisper in the background. Danish
                 // (a daily language here) now quality-routes to Whisper, so its
@@ -421,21 +438,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         samples: samples,
                         language: language,
                         accuracyMode: accuracy,
-                        polish: polish,
-                        polishStyle: review ? .terse : .standard
+                        // In review mode polish runs SEPARATELY below, streamed
+                        // into the already-visible HUD — not inside process().
+                        polish: polish && !review
                     )
                 }
                 utterance.settled(id)
                 Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") polished=\(outcome.polished) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
                 // Never paste directly: the sequencer restores spoken order for
                 // overlapping utterances (an empty text still advances the queue).
-                // With review on, a genuinely-rewritten outcome detours through
-                // the overlay first — which still settles the same sequencer ID
-                // on every path (click / dismiss / timeout), just later.
-                if review, ReviewQueueLogic.needsReview(asrText: outcome.asrText,
-                                                        text: outcome.text,
-                                                        polished: outcome.polished) {
-                    reviewCoordinator.enqueue(id: id, raw: outcome.asrText, polished: outcome.text)
+                // With review on, the HUD shows the raw text IMMEDIATELY and the
+                // terse rewrite streams into it; every path (click / dismiss /
+                // timeout / no-usable-rewrite) still settles this sequencer ID.
+                if review, !outcome.text.isEmpty {
+                    let raw = outcome.text
+                    let coordinator = reviewCoordinator
+                    coordinator.enqueue(id: id, raw: raw)
+                    Task { @MainActor [pipeline] in
+                        let polished = await pipeline.polishText(raw, style: .terse) { partial in
+                            DispatchQueue.main.async {
+                                coordinator.polishPartial(id: id, text: partial)
+                            }
+                        }
+                        coordinator.polishFinished(id: id, polished: polished)
+                    }
                 } else {
                     pasteSequencer.complete(id: id, text: outcome.text)
                 }

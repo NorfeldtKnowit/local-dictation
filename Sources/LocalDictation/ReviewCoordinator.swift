@@ -7,6 +7,10 @@ import Foundation
 /// production, so the sequencer's every-ID-settles contract is preserved on
 /// every path (click, dismiss, timeout).
 ///
+/// Streaming: `polishPartial` bypasses the logic entirely (display-only, ID-
+/// guarded by the controller); only `polishFinished` — which the pipeline
+/// always delivers, bounded by the backends' own timeouts — changes state.
+///
 /// Main-thread only, like `PasteSequencer`: `AppDelegate` drives it from the
 /// main actor and the overlay controller is AppKit.
 final class ReviewCoordinator {
@@ -28,11 +32,23 @@ final class ReviewCoordinator {
         }
     }
 
-    func enqueue(id: UInt64, raw: String, polished: String) {
-        run(logic.enqueue(ReviewRequest(id: id, raw: raw, polished: polished)))
+    /// Show the HUD for a finished utterance (raw text, rewrite pending).
+    func enqueue(id: UInt64, raw: String) {
+        run(logic.enqueue(id: id, raw: raw))
     }
 
-    /// Applies from the next overlay; a deadman already in flight stands.
+    /// Display-only streaming update for the TERSE row (not guardrail-checked;
+    /// never pasted — the final text arrives via `polishFinished`).
+    func polishPartial(id: UInt64, text: String) {
+        overlay.setPolished(id: id, text: text, final: false)
+    }
+
+    /// The polish stage settled (nil = decline/echo → nothing to review).
+    func polishFinished(id: UInt64, polished: String?) {
+        run(logic.polishFinished(id: id, polished: polished))
+    }
+
+    /// Applies from the next deadman arming; one already scheduled stands.
     func setTimeoutPolicy(_ policy: ReviewQueueLogic.TimeoutPolicy) {
         logic.policy = policy
     }
@@ -51,14 +67,17 @@ final class ReviewCoordinator {
     private func run(_ commands: [ReviewQueueLogic.Command]) {
         for command in commands {
             switch command {
-            case .show(let request, let timeout):
-                overlay.show(request, timeout: timeout)
-                if let timeout {
-                    schedule(timeout) { [weak self] in self?.deadmanFired(id: request.id) }
+            case .show(let request):
+                overlay.show(request)
+            case .updatePolished(let id, let text):
+                overlay.setPolished(id: id, text: text, final: true)
+            case .armDeadman(let id, let delay):
+                if let delay {
+                    overlay.resetCountdown(delay)
+                    schedule(delay) { [weak self] in self?.deadmanFired(id: id) }
+                } else {
+                    overlay.showAwaitClick()
                 }
-            case .rearmDeadman(let id, let delay):
-                overlay.resetCountdown(delay)
-                schedule(delay) { [weak self] in self?.deadmanFired(id: id) }
             case .copyToClipboard(let text):
                 TextInjector.copy(text)
             case .complete(let id, let text):
