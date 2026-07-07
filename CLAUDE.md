@@ -290,9 +290,17 @@ off; the CLI constructs none of this — its zero-TCC guarantee holds):
     active-tap disable/re-enable machinery is a failure surface the panel
     doesn't have. `.nonactivatingPanel` delivers clicks WITHOUT activating
     us, so the caret never leaves the target app — the actual requirement.
-  - **Timeout default = RAW** (length-scaled 5-15 s, paused on hover): an
-    unreviewed overlay is treated as a polish decline; the aggressive terse
-    rewrite pastes only on an explicit click.
+  - **Timeout default = TERSE, with the raw text staged on the clipboard.**
+    (Originally RAW-by-default on "unreviewed = polish decline" reasoning;
+    the user overruled it live 2026-07-07: the countdown is too short to
+    actually read both, so the default should be the version review exists
+    for, with raw one Cmd+V away.) The `.copyToClipboard` command runs
+    BEFORE `.complete` on purpose — paste-mode's snapshot/restore then
+    leaves the raw text on the clipboard after the paste.
+  - **Auto-insert delay is a policy** (`Review Auto-Insert ▸` menu):
+    `.auto` length-scaled 5-15 s, `.fixed(n)`, or `.never` (no deadman at
+    all — the overlay waits for a click and later utterances queue behind
+    it visibly, by explicit user choice).
   - **Every utterance ID still settles** through `pasteSequencer.complete`
     on every path (click/dismiss/timeout) — the deadman is an uncancellable
     `asyncAfter` with stale firings ignored by ID (LostReleaseWatchdog's

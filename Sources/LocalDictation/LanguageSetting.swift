@@ -19,6 +19,7 @@ struct LanguageSetting {
     static let polishKey = "polishTranscript"  // Bool; default true
     static let copyKey = "copyInsteadOfPaste"  // Bool; default false
     static let reviewKey = "reviewBeforePaste" // Bool; default false
+    static let reviewAutoInsertKey = "reviewAutoInsert" // "auto" | "never" | seconds; default "auto"
 
     private let defaults: UserDefaults
 
@@ -52,5 +53,13 @@ struct LanguageSetting {
     var reviewBeforePaste: Bool {
         get { defaults.bool(forKey: Self.reviewKey) }
         nonmutating set { defaults.set(newValue, forKey: Self.reviewKey) }
+    }
+
+    /// Review overlay auto-insert delay: "auto" (length-scaled), "never"
+    /// (wait for a click), or a number of seconds as a string ("10").
+    /// Decoded by `ReviewQueueLogic.TimeoutPolicy.from(code:)`.
+    var reviewAutoInsert: String {
+        get { defaults.string(forKey: Self.reviewAutoInsertKey) ?? "auto" }
+        nonmutating set { defaults.set(newValue, forKey: Self.reviewAutoInsertKey) }
     }
 }

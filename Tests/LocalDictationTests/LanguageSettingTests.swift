@@ -25,6 +25,13 @@ final class LanguageSettingTests: XCTestCase {
         XCTAssertTrue(setting.polishTranscript)   // default-ON, opt-out toggle
         XCTAssertFalse(setting.copyInsteadOfPaste)
         XCTAssertFalse(setting.reviewBeforePaste)
+        XCTAssertEqual(setting.reviewAutoInsert, "auto")
+    }
+
+    func testReviewAutoInsertPersists() {
+        let setting = LanguageSetting(defaults: defaults)
+        setting.reviewAutoInsert = "never"
+        XCTAssertEqual(LanguageSetting(defaults: defaults).reviewAutoInsert, "never")
     }
 
     func testPinPersists() {

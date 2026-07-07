@@ -116,10 +116,13 @@ Two menu toggles control what happens once a transcript is ready
   transcript and a TERSE AI rewrite (the polish stage switches to a
   condensing prompt in this mode). Click one to insert it, or the ✕ to
   insert nothing. The overlay never steals focus, so the caret stays where
-  you're typing; if you don't choose, the RAW version auto-inserts after a
-  few seconds (longer for longer transcripts, paused while your pointer
-  hovers the overlay). Effective only while Polish Transcript is on — with
-  polish off there is only one candidate, so text pastes directly.
+  you're typing; if you don't choose in time, the TERSE version
+  auto-inserts and the RAW one is placed on the clipboard (paste it with
+  Cmd+V if the rewrite lost something). The delay is configurable under
+  **Review Auto-Insert ▸**: Auto (scales with length), 10 s, 30 s, or
+  Never (the overlay waits for your click; the countdown also pauses while
+  your pointer hovers it). Effective only while Polish Transcript is on —
+  with polish off there is only one candidate, so text pastes directly.
 - **Copy Instead of Paste**: the transcript is placed on the clipboard and
   stays there (no synthetic Cmd+V, no clipboard restore) — paste it
   yourself wherever you want. Composes with Review Before Paste: the

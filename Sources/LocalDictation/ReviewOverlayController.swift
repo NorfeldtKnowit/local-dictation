@@ -142,7 +142,7 @@ final class ReviewOverlayController {
     private static let panelWidth: CGFloat = 420
     private static let clickShield: TimeInterval = 0.4
 
-    func show(_ request: ReviewRequest, timeout: TimeInterval) {
+    func show(_ request: ReviewRequest, timeout: TimeInterval?) {
         let panel = self.panel ?? Self.makePanel()
         self.panel = panel
         shownID = request.id
@@ -163,8 +163,16 @@ final class ReviewOverlayController {
         // Seed the display hover state from geometry: a pointer already parked
         // inside the fresh panel produces no mouseEntered crossing.
         isHovering = pointerIsOverPanel
-        resetCountdown(timeout)
-        startCountdownTimer()
+        if let timeout {
+            resetCountdown(timeout)
+            startCountdownTimer()
+        } else {
+            // `.never` policy: no deadman, so no countdown to draw.
+            displayDeadline = .distantFuture
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+            refreshCountdown()
+        }
     }
 
     func hide() {
@@ -305,12 +313,16 @@ final class ReviewOverlayController {
 
     private func refreshCountdown() {
         guard let label = countdownLabel else { return }
+        if displayDeadline == .distantFuture {
+            label.stringValue = "Click a version to use it — ✕ for nothing"
+            return
+        }
         if isHovering {
             label.stringValue = "Paused — click a version, or ✕ for nothing"
             return
         }
         let remaining = max(0, displayDeadline.timeIntervalSinceNow)
-        label.stringValue = "Auto-selects RAW in \(Int(remaining.rounded()))s — click to choose"
+        label.stringValue = "TERSE auto-inserts in \(Int(remaining.rounded()))s · RAW goes to the clipboard"
     }
 
     // MARK: - Screen targeting

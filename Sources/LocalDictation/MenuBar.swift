@@ -29,6 +29,15 @@ final class MenuBar {
                                               action: nil, keyEquivalent: "")
     private let reviewMenuItem = NSMenuItem(title: "Review Before Paste",
                                             action: nil, keyEquivalent: "")
+    /// Review Auto-Insert ▸ submenu: how long the overlay waits before picking
+    /// the terse candidate itself ("never" = wait for a click).
+    private let reviewTimingMenu = NSMenu()
+    private static let reviewTimingOptions: [(code: String, title: String)] = [
+        ("auto", "Auto (scales with length)"),
+        ("10", "10 seconds"),
+        ("30", "30 seconds"),
+        ("never", "Never — wait for my click"),
+    ]
 
     /// Whisper-only pins offered below the Parakeet set. Norwegian is here on
     /// purpose: FluidAudio's `Language` enum has no "no"/"nb", so Norwegian must
@@ -57,6 +66,9 @@ final class MenuBar {
     var onToggleCopyMode: ((Bool) -> Void)?
     /// Fired with the new value when the user toggles Review Before Paste.
     var onToggleReview: ((Bool) -> Void)?
+    /// Fired with "auto" / "never" / seconds when a Review Auto-Insert delay
+    /// is picked.
+    var onSelectReviewAutoInsert: ((String) -> Void)?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -110,6 +122,17 @@ final class MenuBar {
                                + "and a terse AI rewrite; click the one to insert (the raw version "
                                + "auto-inserts after a few seconds). Requires Polish Transcript."
         menu.addItem(reviewMenuItem)
+
+        for (code, title) in Self.reviewTimingOptions {
+            let item = NSMenuItem(title: title, action: #selector(selectReviewAutoInsert(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = code
+            reviewTimingMenu.addItem(item)
+        }
+        let reviewTimingItem = NSMenuItem(title: "Review Auto-Insert", action: nil, keyEquivalent: "")
+        reviewTimingItem.submenu = reviewTimingMenu
+        menu.addItem(reviewTimingItem)
 
         copyModeMenuItem.target = self
         copyModeMenuItem.action = #selector(toggleCopyMode)
@@ -234,6 +257,15 @@ final class MenuBar {
         }
     }
 
+    /// Render the Review Auto-Insert checkmark.
+    func setReviewAutoInsert(_ code: String) {
+        DispatchQueue.main.async { [self] in
+            for item in reviewTimingMenu.items {
+                item.state = ((item.representedObject as? String) == code) ? .on : .off
+            }
+        }
+    }
+
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         setLanguage(code)
@@ -262,6 +294,12 @@ final class MenuBar {
         let enabled = reviewMenuItem.state != .on
         setReview(enabled)
         onToggleReview?(enabled)
+    }
+
+    @objc private func selectReviewAutoInsert(_ sender: NSMenuItem) {
+        guard let code = sender.representedObject as? String else { return }
+        setReviewAutoInsert(code)
+        onSelectReviewAutoInsert?(code)
     }
 
     func update(_ state: State) {

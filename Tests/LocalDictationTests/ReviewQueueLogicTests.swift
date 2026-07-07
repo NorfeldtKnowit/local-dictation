@@ -54,13 +54,17 @@ final class ReviewQueueLogicTests: XCTestCase {
         XCTAssertEqual(commands, [.complete(id: 1, text: ""), .hide])
     }
 
-    func testTimeoutCompletesWithRawText() {
-        // An un-reviewed overlay is a polish decline: the terse rewrite must
-        // never paste without an explicit click.
+    func testTimeoutCompletesWithPolishedAndStagesRawOnClipboard() {
+        // Live verdict 2026-07-07: the countdown is too short to really read
+        // both candidates, so the unattended default is the version review
+        // exists FOR (terse) — with the raw one staged on the clipboard.
+        // The copy must come BEFORE the complete so paste-mode's clipboard
+        // snapshot/restore cycle leaves the raw text on the clipboard.
         var logic = ReviewQueueLogic()
-        _ = logic.enqueue(request(7, raw: "safe raw", polished: "aggressive terse"))
+        _ = logic.enqueue(request(7, raw: "the raw", polished: "the terse"))
         let commands = logic.deadmanFired(id: 7, hovering: false)
-        XCTAssertEqual(commands, [.complete(id: 7, text: "safe raw"), .hide])
+        XCTAssertEqual(commands, [.copyToClipboard("the raw"),
+                                  .complete(id: 7, text: "the terse"), .hide])
     }
 
     // MARK: - show command
@@ -119,7 +123,7 @@ final class ReviewQueueLogicTests: XCTestCase {
         XCTAssertEqual(commands, [.rearmDeadman(id: 3, delay: ReviewQueueLogic.hoverGrace)])
         // Still showing; the re-armed deadman (no longer hovering) decides.
         XCTAssertEqual(logic.deadmanFired(id: 3, hovering: false),
-                       [.complete(id: 3, text: "raw text"), .hide])
+                       [.copyToClipboard("raw text"), .complete(id: 3, text: "terse"), .hide])
     }
 
     func testHoverRearmIsBoundedSoTheQueueCannotStallForever() {
@@ -127,14 +131,15 @@ final class ReviewQueueLogicTests: XCTestCase {
         // maxHoverRearms times; then the raw default wins even while hovering,
         // because every later utterance is queued behind this ID.
         var logic = ReviewQueueLogic()
-        _ = logic.enqueue(request(4, raw: "the raw"))
+        _ = logic.enqueue(request(4, raw: "the raw", polished: "the terse"))
         for _ in 0..<ReviewQueueLogic.maxHoverRearms {
             // Each re-arm emits exactly one .rearmDeadman and never a .complete.
             XCTAssertEqual(logic.deadmanFired(id: 4, hovering: true),
                            [.rearmDeadman(id: 4, delay: ReviewQueueLogic.hoverGrace)])
         }
         XCTAssertEqual(logic.deadmanFired(id: 4, hovering: true),
-                       [.complete(id: 4, text: "the raw"), .hide])
+                       [.copyToClipboard("the raw"),
+                        .complete(id: 4, text: "the terse"), .hide])
     }
 
     func testHoverRearmBudgetResetsForTheNextRequest() {
@@ -157,11 +162,48 @@ final class ReviewQueueLogicTests: XCTestCase {
         // The queue must drain on TIMEOUT decisions too, not only clicks —
         // otherwise a timed-out head strands everything behind it.
         var logic = ReviewQueueLogic()
-        _ = logic.enqueue(request(1, raw: "first raw"))
+        _ = logic.enqueue(request(1, raw: "first raw", polished: "first terse"))
         _ = logic.enqueue(request(2))
         let commands = logic.deadmanFired(id: 1, hovering: false)
-        XCTAssertEqual(commands, [.complete(id: 1, text: "first raw"), .hide,
+        XCTAssertEqual(commands, [.copyToClipboard("first raw"),
+                                  .complete(id: 1, text: "first terse"), .hide,
                                   .show(request(2), timeout: 5)])
+    }
+
+    // MARK: - timeout policy
+
+    func testFixedPolicyOverridesLengthScaling() {
+        var logic = ReviewQueueLogic()
+        logic.policy = .fixed(30)
+        let commands = logic.enqueue(request(1, raw: String(repeating: "x", count: 400)))
+        XCTAssertEqual(commands, [.show(request(1, raw: String(repeating: "x", count: 400)),
+                                        timeout: 30)])
+    }
+
+    func testNeverPolicyShowsWithoutDeadman() {
+        var logic = ReviewQueueLogic()
+        logic.policy = .never
+        XCTAssertEqual(logic.enqueue(request(1)), [.show(request(1), timeout: nil)])
+        // A click still decides normally.
+        XCTAssertEqual(logic.choose(id: 1, .polished), [.complete(id: 1, text: "terse"), .hide])
+    }
+
+    func testPolicyAppliesToQueueAdvanceToo() {
+        var logic = ReviewQueueLogic()
+        logic.policy = .never
+        _ = logic.enqueue(request(1))
+        _ = logic.enqueue(request(2))
+        let commands = logic.choose(id: 1, .raw)
+        XCTAssertEqual(commands, [.complete(id: 1, text: "raw text"), .hide,
+                                  .show(request(2), timeout: nil)])
+    }
+
+    func testPolicyDecodingFromMenuCodes() {
+        XCTAssertEqual(ReviewQueueLogic.TimeoutPolicy.from(code: "auto"), .auto)
+        XCTAssertEqual(ReviewQueueLogic.TimeoutPolicy.from(code: "never"), .never)
+        XCTAssertEqual(ReviewQueueLogic.TimeoutPolicy.from(code: "10"), .fixed(10))
+        // Garbage falls back to auto rather than crashing or never-inserting.
+        XCTAssertEqual(ReviewQueueLogic.TimeoutPolicy.from(code: "bogus"), .auto)
     }
 
     func testQueuedRequestShowsAfterCurrentDecides() {

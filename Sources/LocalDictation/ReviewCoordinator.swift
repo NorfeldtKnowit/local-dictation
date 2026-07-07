@@ -32,13 +32,18 @@ final class ReviewCoordinator {
         run(logic.enqueue(ReviewRequest(id: id, raw: raw, polished: polished)))
     }
 
+    /// Applies from the next overlay; a deadman already in flight stands.
+    func setTimeoutPolicy(_ policy: ReviewQueueLogic.TimeoutPolicy) {
+        logic.policy = policy
+    }
+
     private func deadmanFired(id: UInt64) {
         // Geometry at decision time, not cached tracking-area state: a pointer
         // parked over the panel since before it appeared never crossed into it.
         let hovering = overlay.pointerIsOverPanel
         let commands = logic.deadmanFired(id: id, hovering: hovering)
         if commands.contains(where: { if case .complete = $0 { return true }; return false }) {
-            Log.info("review: picked=timeout(raw) id=\(id)", "review")
+            Log.info("review: picked=timeout(terse; raw -> clipboard) id=\(id)", "review")
         }
         run(commands)
     }
@@ -48,10 +53,14 @@ final class ReviewCoordinator {
             switch command {
             case .show(let request, let timeout):
                 overlay.show(request, timeout: timeout)
-                schedule(timeout) { [weak self] in self?.deadmanFired(id: request.id) }
+                if let timeout {
+                    schedule(timeout) { [weak self] in self?.deadmanFired(id: request.id) }
+                }
             case .rearmDeadman(let id, let delay):
                 overlay.resetCountdown(delay)
                 schedule(delay) { [weak self] in self?.deadmanFired(id: id) }
+            case .copyToClipboard(let text):
+                TextInjector.copy(text)
             case .complete(let id, let text):
                 complete(id, text)
             case .hide:

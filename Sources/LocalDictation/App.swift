@@ -173,11 +173,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.settings.reviewBeforePaste = enabled
             Log.info("review before paste: \(enabled)", "app")
         }
+        menuBar.onSelectReviewAutoInsert = { [weak self] code in
+            self?.settings.reviewAutoInsert = code
+            self?.reviewCoordinator.setTimeoutPolicy(.from(code: code))
+            Log.info("review auto-insert: \(code)", "app")
+        }
         menuBar.setLanguage(settings.language)
         menuBar.setAccuracyMode(settings.accuracyMode)
         menuBar.setPolishTranscript(settings.polishTranscript)
         menuBar.setCopyMode(settings.copyInsteadOfPaste)
         menuBar.setReview(settings.reviewBeforePaste)
+        menuBar.setReviewAutoInsert(settings.reviewAutoInsert)
+        reviewCoordinator.setTimeoutPolicy(.from(code: settings.reviewAutoInsert))
 
         // Additive AVCaptureSession runtime-error observer. AudioRecorder itself
         // is deliberately untouched (sacred capture path, see CLAUDE.md), so we
