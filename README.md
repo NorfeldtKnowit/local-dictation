@@ -106,6 +106,25 @@ Siri) on macOS 26+. When it's off, the toggle stays functional but inert —
 the log shows `polish inactive: … (appleIntelligenceNotEnabled)` once and
 dictation behaves exactly as before.
 
+## Delivery options
+
+Two menu toggles control what happens once a transcript is ready
+(both off by default):
+
+- **Review Before Paste**: instead of pasting immediately, a small floating
+  overlay appears near the top of the screen with two candidates — the RAW
+  transcript and a TERSE AI rewrite (the polish stage switches to a
+  condensing prompt in this mode). Click one to insert it, or the ✕ to
+  insert nothing. The overlay never steals focus, so the caret stays where
+  you're typing; if you don't choose, the RAW version auto-inserts after a
+  few seconds (longer for longer transcripts, paused while your pointer
+  hovers the overlay). Effective only while Polish Transcript is on — with
+  polish off there is only one candidate, so text pastes directly.
+- **Copy Instead of Paste**: the transcript is placed on the clipboard and
+  stays there (no synthetic Cmd+V, no clipboard restore) — paste it
+  yourself wherever you want. Composes with Review Before Paste: the
+  candidate you pick is what lands on the clipboard.
+
 ## Quick start
 
 ```bash
@@ -127,10 +146,10 @@ The first launch will:
    You may also need to add it under **Input Monitoring**.
 3. Show "Loading Whisper model…" in the menu bar while it downloads
    the ~600 MB Core ML model to `~/Documents/huggingface/...`. (~1 minute.)
-4. Switch to the gray mic icon (ready).
+4. Switch to the gray waveform icon (ready).
 
 Then hold **Right Option** and talk. The icon turns **Naples yellow**
-while listening, switches to a waveform during transcription, then the
+while listening, switches to a spinner during transcription, then the
 text pastes into the focused app.
 
 ## Why stable code signing matters
@@ -172,13 +191,16 @@ See `CLAUDE.md` for the full permissions playbook.
 
 ## Menu bar states
 
-| Icon                    | State                                        |
-|-------------------------|----------------------------------------------|
-| ⬇  arrow.down.circle    | Loading model on first launch                |
-| 🎙 mic (gray)            | Idle — ready, hold Right Option to dictate   |
-| 🎙 mic.fill (yellow)     | Listening — Naples yellow #FADA5E            |
-| ◌ spinner (yellow)      | Transcribing — rotating Naples-yellow symbol |
-| ⚠ exclamationmark       | Error — open the menu for context            |
+| Icon                       | State                                        |
+|----------------------------|----------------------------------------------|
+| ⬇  arrow.down.circle       | Loading model on first launch                |
+| 〜 waveform (gray)          | Idle — ready, hold Right Option to dictate   |
+| 〜 waveform.circle.fill (yellow) | Listening — Naples yellow #FADA5E       |
+| ◌ spinner (yellow)         | Transcribing — rotating Naples-yellow symbol |
+| ⚠ exclamationmark          | Error — open the menu for context            |
+
+(The idle icon is deliberately not a mic: macOS shows its own mic indicator
+in the menu bar while recording, and two mics read as a duplicate.)
 
 ## CLI mode (headless transcription)
 
@@ -304,7 +326,7 @@ check rather than default CI.
 - **Cmd+V is refused in password fields** by some apps. The transcript
   stays on the clipboard for ~200 ms so you can paste manually.
 - **Don't queue presses against a downloading model.** The first launch
-  blocks the hotkey until "ready" — wait for the gray mic icon before
+  blocks the hotkey until "ready" — wait for the gray waveform icon before
   the first press.
 
 ## File map
@@ -312,7 +334,7 @@ check rather than default CI.
 | File | Purpose |
 |------|---------|
 | `Sources/LocalDictation/App.swift` | `@main` entry point (async, branches to CLI or GUI), app delegate, watchdogs |
-| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode, Polish Transcript |
+| `Sources/LocalDictation/MenuBar.swift` | `NSStatusItem` with five states, Language ▸ submenu, Accuracy Mode, Polish Transcript, Review Before Paste, Copy Instead of Paste |
 | `Sources/LocalDictation/HotkeyMonitor.swift` | `CGEventTap` watching Right Option; `isDown` delegates to `HotkeyStateMachine` |
 | `Sources/LocalDictation/HotkeyStateMachine.swift` | Pure press/release/tap-disabled state machine (unit tested) |
 | `Sources/LocalDictation/AudioRecorder.swift` | AVCaptureSession → 16 kHz mono Float32 (frozen since the Float32 output pin `1ee728e`; do not modify) |
@@ -320,7 +342,7 @@ check rather than default CI.
 | `Sources/LocalDictation/ParakeetEngine.swift` | FluidAudio Parakeet TDT v3 engine (low-latency default) |
 | `Sources/LocalDictation/TranscriptionEngine.swift` | `EngineKind` + the shared engine protocol |
 | `Sources/LocalDictation/EngineRouter.swift` | Pure language/Accuracy-Mode → engine routing decision |
-| `Sources/LocalDictation/LanguageSetting.swift` | `UserDefaults`-backed language pin + Accuracy Mode + Polish Transcript toggles |
+| `Sources/LocalDictation/LanguageSetting.swift` | `UserDefaults`-backed language pin + Accuracy/Polish/Review/Copy toggles |
 | `Sources/LocalDictation/SpeechGate.swift` | Actor over FluidAudio's Silero VAD; degrades gracefully if unavailable |
 | `Sources/LocalDictation/SpeechGateLogic.swift` | Pure gate decision + speech-region trimming (unit tested, no models) |
 | `Sources/LocalDictation/HallucinationFilter.swift` | Pure post-ASR blocklist + repetition-loop guard |
@@ -330,6 +352,9 @@ check rather than default CI.
 | `Sources/LocalDictation/DictationPipeline.swift` | Actor: gate → route → transcribe → filter → polish (single reuse point, GUI + CLI) |
 | `Sources/LocalDictation/UtteranceStateMachine.swift` | Pure recording/transcription bookkeeping with monotonic IDs |
 | `Sources/LocalDictation/PasteSequencer.swift` | Pure paste ordering: strict utterance-ID order, >= 300 ms between pastes |
+| `Sources/LocalDictation/ReviewQueueLogic.swift` | Pure Review-Before-Paste queue: FIFO, decide-exactly-once, deadman timeout (unit tested) |
+| `Sources/LocalDictation/ReviewOverlayController.swift` | Non-activating overlay panel: raw vs terse candidates, countdown, hover pause |
+| `Sources/LocalDictation/ReviewCoordinator.swift` | Glue: runs ReviewQueueLogic commands against the overlay + paste sequencer |
 | `Sources/LocalDictation/LostReleaseWatchdog.swift` | Pure watchdog decision: re-arm on genuine hold vs end on lost release |
 | `Sources/LocalDictation/WavLoader.swift` | `AVAudioFile` → 16 kHz mono Float32 for CLI fixtures (CLI-only; recorder untouched) |
 | `Sources/LocalDictation/CLI.swift` | `CLIArguments` parser + `CLIRunner` for `--transcribe-file` |

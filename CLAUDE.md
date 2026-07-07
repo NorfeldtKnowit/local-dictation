@@ -43,7 +43,9 @@ transcribe → inject:
   FoundationModels behind the `TranscriptPolishing` seam; no-ops gracefully
   when Apple Intelligence is unavailable.
 - `TranscriptPolisherLogic.swift` — pure polish instructions + accept
-  guardrails (length ratio, no added newlines, language-flip reject).
+  guardrails (length ratio, no added newlines, language-flip reject); two
+  `PolishStyle`s: `.standard` (faithful cleanup) and `.terse` (condensing,
+  looser 0.15 shrink floor) — terse is what the review overlay offers.
 - `DictationPipeline.swift` — actor tying gate → route → transcribe → filter
   → polish together; the single reuse point for both GUI and CLI.
 - `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy
@@ -52,13 +54,25 @@ transcribe → inject:
   with monotonic IDs.
 - `PasteSequencer.swift` — pure paste ordering: flushes outcomes in strict
   utterance-ID order with >= 300 ms between actual pastes.
+- `ReviewQueueLogic.swift` — pure Review-Before-Paste queue: FIFO, one
+  overlay at a time, decide-exactly-once per utterance ID, id-guarded
+  deadman timeout (default = raw text, so the terse rewrite never pastes
+  unreviewed).
+- `ReviewOverlayController.swift` — AppKit half of review: non-activating
+  borderless NSPanel (never key/main — the caret must stay in the target
+  app; never add `NSApp.activate` here), clickable raw/terse rows,
+  countdown, hover pause, AX-focused-window screen targeting.
+- `ReviewCoordinator.swift` — glue: executes ReviewQueueLogic commands
+  against the overlay and `pasteSequencer.complete`.
 - `LostReleaseWatchdog.swift` — pure watchdog decision: re-arm on a genuine
   long hold vs end on a lost release.
 - `WavLoader.swift` — CLI-only `AVAudioFile` → 16 kHz mono Float32 loader.
 - `CLI.swift` — `CLIArguments` parser + `CLIRunner` for `--transcribe-file`.
 - `TextInjector.swift` — pasteboard + synthetic Cmd+V.
-- `MenuBar.swift` — status item, click handling, state icons, spinner,
-  Language ▸ submenu, Accuracy Mode checkbox.
+- `MenuBar.swift` — status item, click handling, state icons (waveform, NOT
+  a mic — macOS shows its own mic indicator while recording), spinner,
+  Language ▸ submenu, Accuracy Mode / Polish / Review Before Paste / Copy
+  Instead of Paste checkboxes.
 - `Permissions.swift` — TCC requests / settings deep-links.
 - `Log.swift` — tee logger to stderr + `~/Library/Logs/local-dictation.log`.
 
@@ -258,6 +272,42 @@ is "raw ASR text"); `--no-polish` / the menu's "Polish Transcript" checkbox
   single-file CLI needs `xcrun swiftc -O -parse-as-library` (plain `swiftc`
   rejects `@main` in a one-file build without that flag).
 
+### Delivery: review overlay + copy mode (GUI only)
+
+Two menu toggles sit AFTER the pipeline, purely in the delivery path
+(`LanguageSetting.reviewBeforePaste` / `.copyInsteadOfPaste`, both default
+off; the CLI constructs none of this — its zero-TCC guarantee holds):
+
+- **Review Before Paste** switches polish to `PolishStyle.terse` and, when
+  the rewrite genuinely differs (`ReviewQueueLogic.needsReview`), detours the
+  outcome through a floating overlay: RAW vs TERSE rows, mouse-click to
+  choose, ✕ = insert nothing. Design invariants (all landed after an
+  adversarial design review — don't relitigate them casually):
+  - **Mouse-only selection, no event tap.** A keyboard scheme (bare or
+    modifier-chorded keys via an active CGEvent tap) was rejected: bare keys
+    swallow real typing (Return/Esc especially), Right-Option chords collide
+    with push-to-talk, secure-input contexts silently blind taps, and the
+    active-tap disable/re-enable machinery is a failure surface the panel
+    doesn't have. `.nonactivatingPanel` delivers clicks WITHOUT activating
+    us, so the caret never leaves the target app — the actual requirement.
+  - **Timeout default = RAW** (length-scaled 5-15 s, paused on hover): an
+    unreviewed overlay is treated as a polish decline; the aggressive terse
+    rewrite pastes only on an explicit click.
+  - **Every utterance ID still settles** through `pasteSequencer.complete`
+    on every path (click/dismiss/timeout) — the deadman is an uncancellable
+    `asyncAfter` with stale firings ignored by ID (LostReleaseWatchdog's
+    `firedID` idiom), so a lost UI callback can never stall the queue.
+  - Panel flags that are load-bearing and easy to lose in a refactor:
+    `.fullScreenAuxiliary` (else invisible over full-screen apps while the
+    timeout auto-pastes), `hidesOnDeactivate = false` (NSPanel defaults it
+    true; this app is never active), `NSVisualEffectView.state = .active`
+    (never-key window otherwise draws the inactive fallback), countdown
+    timer in `.common` run-loop mode.
+- **Copy Instead of Paste** stages the text on the clipboard with no
+  synthetic Cmd+V and no restore (restoring would clobber the very text the
+  user asked to keep). It must stay inside the sequencer's paste closure —
+  mode is read at flush time — never a "skip the sequencer" shortcut.
+
 ### Debugging bad transcripts: the last utterance is on disk
 
 Synthesized `say` fixtures proved misleading for real-speech quality, so the
@@ -335,8 +385,8 @@ at the deadline (regression-tested in `AsyncTimeoutTests`).
   library-target split. Don't reintroduce one "to make testing possible"; it
   isn't needed and it would move every TCC-sensitive file.
 - `swift test` runs the pure-logic suite (state machines, router, gate logic,
-  hallucination filter, pipeline via fakes, CLI argument parsing): no models,
-  no mic, seconds to run, safe for default CI.
+  hallucination filter, review queue, pipeline via fakes, CLI argument
+  parsing): no models, no mic, seconds to run, safe for default CI.
 - `scripts/test-cli.sh` is the model-touching e2e layer: it drives the real
   release binary's `--transcribe-file` mode against `scripts/make-fixtures.sh`
   fixtures (Danish → Whisper via `whisperPreferred` routing, English →
