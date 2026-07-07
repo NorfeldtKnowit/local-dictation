@@ -35,13 +35,17 @@ private final class CandidateRow: NSView {
         let textLabel = NSTextField(wrappingLabelWithString: text)
         textLabel.font = .systemFont(ofSize: 13)
         textLabel.textColor = .labelColor
-        textLabel.maximumNumberOfLines = 3
+        // Generous cap so the whole transcript is reviewable (the point of the
+        // overlay); at ~70 chars/line this covers north of 800 chars per
+        // candidate. Truly extreme dictations ellipsize on the last line —
+        // the raw text is still recoverable via clipboard/log.
+        textLabel.maximumNumberOfLines = 12
         // NOT lineBreakMode = .byTruncatingTail: any truncating mode flips the
         // cell to single-line layout and maximumNumberOfLines goes inert
         // (verified empirically — the rows rendered exactly one line). This
-        // keeps word-wrap and only ellipsizes the third line on overflow.
+        // keeps word-wrap and only ellipsizes the last line on overflow.
         textLabel.cell?.truncatesLastVisibleLine = true
-        textLabel.preferredMaxLayoutWidth = 360
+        textLabel.preferredMaxLayoutWidth = 456
         textLabel.isSelectable = false
 
         let stack = NSStackView(views: [badgeLabel, textLabel])
@@ -139,7 +143,7 @@ final class ReviewOverlayController {
     private var shownID: UInt64?
     private var shownAt = Date.distantPast
 
-    private static let panelWidth: CGFloat = 420
+    private static let panelWidth: CGFloat = 520
     private static let clickShield: TimeInterval = 0.4
 
     func show(_ request: ReviewRequest, timeout: TimeInterval?) {
