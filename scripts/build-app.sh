@@ -28,6 +28,24 @@ mkdir -p "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/local-dictation"
 chmod +x "$APP/Contents/MacOS/local-dictation"
 
+# SPM resource bundles (e.g. swift-transformers_Hub.bundle) must ship inside
+# the app: Bundle.module resolves via the main bundle's Resources first and
+# fatalErrors if the bundle is missing. Copy every bundle the build produced.
+for bundle in "$ROOT/.build/release/"*.bundle; do
+  [ -e "$bundle" ] || continue
+  cp -R "$bundle" "$APP/Contents/Resources/"
+done
+
+# MLX Metal shaders: `swift build` cannot compile them (see
+# scripts/build-metallib.sh). MLX's first loader path is an `mlx.metallib`
+# colocated with the executable — without it the Qwen polish backend aborts
+# the process at first use.
+if [ ! -f "$ROOT/.build/mlx.metallib" ]; then
+  echo "Missing $ROOT/.build/mlx.metallib — run scripts/build-metallib.sh first." >&2
+  exit 1
+fi
+cp "$ROOT/.build/mlx.metallib" "$APP/Contents/MacOS/mlx.metallib"
+
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
