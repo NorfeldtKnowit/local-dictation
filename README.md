@@ -112,17 +112,22 @@ Two menu toggles control what happens once a transcript is ready
 (both off by default):
 
 - **Review Before Paste**: instead of pasting immediately, a small floating
-  overlay appears near the top of the screen with two candidates — the RAW
-  transcript and a TERSE AI rewrite (the polish stage switches to a
-  condensing prompt in this mode). Click one to insert it, or the ✕ to
-  insert nothing. The overlay never steals focus, so the caret stays where
-  you're typing; if you don't choose in time, the TERSE version
-  auto-inserts and the RAW one is placed on the clipboard (paste it with
-  Cmd+V if the rewrite lost something). The delay is configurable under
-  **Review Auto-Insert ▸**: Auto (scales with length), 10 s, 30 s, or
-  Never (the overlay waits for your click; the countdown also pauses while
-  your pointer hovers it). Effective only while Polish Transcript is on —
-  with polish off there is only one candidate, so text pastes directly.
+  overlay appears near the top of the screen the moment transcription
+  finishes, showing the RAW transcript right away; a TERSE AI rewrite then
+  STREAMS into the second row as it generates. Click a version to insert
+  it (RAW is clickable even while the rewrite is still streaming), or ✕
+  to insert nothing. The overlay never steals focus, so the caret stays
+  where you're typing. Once the rewrite is ready a countdown starts: if
+  you don't choose in time, the TERSE version auto-inserts and the RAW one
+  is placed on the clipboard (paste it with Cmd+V if the rewrite lost
+  something). The delay is configurable under **Review Auto-Insert ▸**:
+  Auto (scales with length), 10 s, 30 s, or Never (wait for your click;
+  the countdown also pauses while your pointer hovers the overlay).
+  Effective only while Polish Transcript is on. English rewrites run on
+  Apple's Foundation model (fast); other languages (Danish!) run on a
+  local **Qwen3-4B-Instruct** via MLX — a one-time ~2.5 GB download the
+  first time review mode is on (set `LOCAL_DICTATION_PRELOAD_QWEN=0` in
+  the LaunchAgent plist to defer it to first use).
 - **Copy Instead of Paste**: the transcript is placed on the clipboard and
   stays there (no synthetic Cmd+V, no clipboard restore) — paste it
   yourself wherever you want. Composes with Review Before Paste: the
@@ -351,6 +356,7 @@ check rather than default CI.
 | `Sources/LocalDictation/HallucinationFilter.swift` | Pure post-ASR blocklist + repetition-loop guard |
 | `Sources/LocalDictation/FillerFilter.swift` | Pure standalone-filler strip (en + da), whole-token only |
 | `Sources/LocalDictation/TranscriptPolisher.swift` | Actor: LLM polish on Apple FoundationModels; graceful no-op when unavailable |
+| `Sources/LocalDictation/MLXPolisher.swift` | Actor: LLM polish on Qwen3-4B via MLX (non-English review rewrites) + language routing |
 | `Sources/LocalDictation/TranscriptPolisherLogic.swift` | Pure polish instructions + accept guardrails (unit tested, no model) |
 | `Sources/LocalDictation/DictationPipeline.swift` | Actor: gate → route → transcribe → filter → polish (single reuse point, GUI + CLI) |
 | `Sources/LocalDictation/UtteranceStateMachine.swift` | Pure recording/transcription bookkeeping with monotonic IDs |

@@ -41,7 +41,17 @@ transcribe → inject:
   whole-token matches only; runs after the hallucination filter.
 - `TranscriptPolisher.swift` — actor: optional layer-4 LLM rewrite on Apple
   FoundationModels behind the `TranscriptPolishing` seam; no-ops gracefully
-  when Apple Intelligence is unavailable.
+  when Apple Intelligence is unavailable. NOTE: Apple's FM is English-only
+  in practice (it requires system+Siri language = English, verified live
+  2026-07-07), which is why the MLX backend below exists.
+- `MLXPolisher.swift` — actor: layer-4 rewrite on Qwen3-4B-Instruct 4-bit
+  via MLX (pinned HF revision, ~2.5 GB one-time download, ~3 GB resident
+  once loaded), plus `PolishBackendRouter` (pure: en → Apple FM, everything
+  else → MLX) and `RoutedPolisher` (the composite). Reached ONLY through
+  the review path — `process()`'s inline polish and the CLI stay FM-only
+  because MLX's cold spins need the HUD's feedback surface. Streams
+  accumulated output via the protocol's `onPartial` (display-only; only
+  the final, guardrail-checked text may paste).
 - `TranscriptPolisherLogic.swift` — pure polish instructions + accept
   guardrails (length ratio, no added newlines, language-flip reject); two
   `PolishStyle`s: `.standard` (faithful cleanup) and `.terse` (condensing,
@@ -79,7 +89,14 @@ transcribe → inject:
 ## Build and deploy
 
 The running daemon executes the **app bundle** at
-`~/Applications/local-dictation.app`, not the raw SPM binary. The full cycle:
+`~/Applications/local-dictation.app`, not the raw SPM binary. Notes:
+`Package.resolved` is COMMITTED (supply-chain lock since the MLX deps landed
+2026-07-07 — review its diff on every change; MLX model weights are further
+pinned to an exact HF revision in `MLXPolisher`). `build-app.sh` copies the
+build's SPM resource bundles (e.g. `swift-transformers_Hub.bundle`) into
+`Contents/Resources` — `Bundle.module` fatalErrors without them. MLX needs no
+metallib bundle: mlx-swift uses runtime-JIT-compiled Metal kernels (the
+package excludes `nojit_kernels.cpp`). The full cycle:
 
 ```bash
 swift build -c release
@@ -278,11 +295,16 @@ Two menu toggles sit AFTER the pipeline, purely in the delivery path
 (`LanguageSetting.reviewBeforePaste` / `.copyInsteadOfPaste`, both default
 off; the CLI constructs none of this — its zero-TCC guarantee holds):
 
-- **Review Before Paste** switches polish to `PolishStyle.terse` and, when
-  the rewrite genuinely differs (`ReviewQueueLogic.needsReview`), detours the
-  outcome through a floating overlay: RAW vs TERSE rows, mouse-click to
-  choose, ✕ = insert nothing. Design invariants (all landed after an
-  adversarial design review — don't relitigate them casually):
+- **Review Before Paste** shows the HUD the moment ASR finishes (RAW row
+  immediately) and STREAMS the terse rewrite into the second row:
+  `process(polish: false)` → `reviewCoordinator.enqueue` → the pipeline's
+  separate `polishText(_:style:onPartial:)` → `polishFinished`, which
+  either completes with raw instantly (decline/echo — no single-candidate
+  overlay) or arms the countdown. RAW is clickable while streaming. The
+  pending state is bounded by the polish backends' own timeouts (6 s FM /
+  30 s MLX), so `polishFinished` ALWAYS arrives and the sequencer can't
+  stall. Design invariants (all landed after an adversarial design
+  review — don't relitigate them casually):
   - **Mouse-only selection, no event tap.** A keyboard scheme (bare or
     modifier-chorded keys via an active CGEvent tap) was rejected: bare keys
     swallow real typing (Return/Esc especially), Right-Option chords collide
