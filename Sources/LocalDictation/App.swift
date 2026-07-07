@@ -89,7 +89,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         schedule: { delay, action in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
         },
-        paste: { TextInjector.paste($0) }
+        // Delivery mode is read at FLUSH time (not utterance end): the sequencer
+        // may hold an outcome briefly, and the mode the user sees checked when
+        // the text lands is the one that should apply.
+        paste: { [settings] text in
+            if settings.copyInsteadOfPaste {
+                TextInjector.copy(text)
+            } else {
+                TextInjector.paste(text)
+            }
+        }
+    )
+
+    /// Review Before Paste: pure queue logic + AppKit overlay. Every reviewed
+    /// utterance still settles through `pasteSequencer.complete` (click,
+    /// dismiss and timeout all converge there), so utterance-ID ordering and
+    /// the every-ID-completes contract are untouched by review mode.
+    private lazy var reviewCoordinator = ReviewCoordinator(
+        schedule: { delay, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        },
+        complete: { [weak self] id, text in
+            self?.pasteSequencer.complete(id: id, text: text)
+        }
     )
 
     /// Set when Parakeet fails to warm at launch. Equivalent to Accuracy Mode:
@@ -143,9 +165,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // first polished utterance. No-op when unavailable or already warm.
             if enabled { Task.detached(priority: .background) { await polisher.warmUp() } }
         }
+        menuBar.onToggleCopyMode = { [weak self] enabled in
+            self?.settings.copyInsteadOfPaste = enabled
+            Log.info("copy instead of paste: \(enabled)", "app")
+        }
+        menuBar.onToggleReview = { [weak self] enabled in
+            self?.settings.reviewBeforePaste = enabled
+            Log.info("review before paste: \(enabled)", "app")
+        }
         menuBar.setLanguage(settings.language)
         menuBar.setAccuracyMode(settings.accuracyMode)
         menuBar.setPolishTranscript(settings.polishTranscript)
+        menuBar.setCopyMode(settings.copyInsteadOfPaste)
+        menuBar.setReview(settings.reviewBeforePaste)
 
         // Additive AVCaptureSession runtime-error observer. AudioRecorder itself
         // is deliberately untouched (sacred capture path, see CLAUDE.md), so we
@@ -349,6 +381,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let language = settings.language
         let accuracy = settings.accuracyMode || forceWhisper
         let polish = settings.polishTranscript
+        // Review mode is only meaningful with polish on (one candidate is no
+        // choice), and it switches polish to the terse rewrite — that is the
+        // whole point of the second candidate.
+        let review = settings.reviewBeforePaste && polish
 
         Task { @MainActor in
             do {
@@ -378,14 +414,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         samples: samples,
                         language: language,
                         accuracyMode: accuracy,
-                        polish: polish
+                        polish: polish,
+                        polishStyle: review ? .terse : .standard
                     )
                 }
                 utterance.settled(id)
                 Log.info("utterance \(id): engine=\(outcome.engine?.rawValue ?? "none") gate=\(outcome.gate) filtered=\(outcome.filtered) rescued=\(outcome.rescue?.rawValue ?? "no") polished=\(outcome.polished) inference=\(String(format: "%.2f", outcome.inferenceSeconds))s, \(outcome.text.count) chars: \(outcome.text.prefix(120))", "app")
                 // Never paste directly: the sequencer restores spoken order for
                 // overlapping utterances (an empty text still advances the queue).
-                pasteSequencer.complete(id: id, text: outcome.text)
+                // With review on, a genuinely-rewritten outcome detours through
+                // the overlay first — which still settles the same sequencer ID
+                // on every path (click / dismiss / timeout), just later.
+                if review, ReviewQueueLogic.needsReview(asrText: outcome.asrText,
+                                                        text: outcome.text,
+                                                        polished: outcome.polished) {
+                    reviewCoordinator.enqueue(id: id, raw: outcome.asrText, polished: outcome.text)
+                } else {
+                    pasteSequencer.complete(id: id, text: outcome.text)
+                }
                 refreshMenuState()
             } catch {
                 utterance.settled(id)

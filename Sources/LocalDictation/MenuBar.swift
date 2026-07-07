@@ -25,6 +25,10 @@ final class MenuBar {
                                               action: nil, keyEquivalent: "")
     private let polishMenuItem = NSMenuItem(title: "Polish Transcript (AI cleanup)",
                                             action: nil, keyEquivalent: "")
+    private let copyModeMenuItem = NSMenuItem(title: "Copy Instead of Paste",
+                                              action: nil, keyEquivalent: "")
+    private let reviewMenuItem = NSMenuItem(title: "Review Before Paste",
+                                            action: nil, keyEquivalent: "")
 
     /// Whisper-only pins offered below the Parakeet set. Norwegian is here on
     /// purpose: FluidAudio's `Language` enum has no "no"/"nb", so Norwegian must
@@ -49,6 +53,10 @@ final class MenuBar {
     var onToggleAccuracy: ((Bool) -> Void)?
     /// Fired with the new value when the user toggles Polish Transcript.
     var onTogglePolish: ((Bool) -> Void)?
+    /// Fired with the new value when the user toggles Copy Instead of Paste.
+    var onToggleCopyMode: ((Bool) -> Void)?
+    /// Fired with the new value when the user toggles Review Before Paste.
+    var onToggleReview: ((Bool) -> Void)?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -95,6 +103,19 @@ final class MenuBar {
                                + "Intelligence model. Requires Apple Intelligence to be enabled in "
                                + "System Settings; inactive (no effect) otherwise."
         menu.addItem(polishMenuItem)
+
+        reviewMenuItem.target = self
+        reviewMenuItem.action = #selector(toggleReview)
+        reviewMenuItem.toolTip = "After each dictation, show a small overlay with the raw transcript "
+                               + "and a terse AI rewrite; click the one to insert (the raw version "
+                               + "auto-inserts after a few seconds). Requires Polish Transcript."
+        menu.addItem(reviewMenuItem)
+
+        copyModeMenuItem.target = self
+        copyModeMenuItem.action = #selector(toggleCopyMode)
+        copyModeMenuItem.toolTip = "Leave the transcript on the clipboard instead of pasting it "
+                                 + "into the focused app — paste it yourself with Cmd+V."
+        menu.addItem(copyModeMenuItem)
         menu.addItem(.separator())
 
         let micItem = NSMenuItem(title: "Open Microphone settings…",
@@ -199,6 +220,20 @@ final class MenuBar {
         }
     }
 
+    /// Render the Copy Instead of Paste checkbox.
+    func setCopyMode(_ enabled: Bool) {
+        DispatchQueue.main.async { [self] in
+            copyModeMenuItem.state = enabled ? .on : .off
+        }
+    }
+
+    /// Render the Review Before Paste checkbox.
+    func setReview(_ enabled: Bool) {
+        DispatchQueue.main.async { [self] in
+            reviewMenuItem.state = enabled ? .on : .off
+        }
+    }
+
     @objc private func selectLanguage(_ sender: NSMenuItem) {
         guard let code = sender.representedObject as? String else { return }
         setLanguage(code)
@@ -215,6 +250,18 @@ final class MenuBar {
         let enabled = polishMenuItem.state != .on
         setPolishTranscript(enabled)
         onTogglePolish?(enabled)
+    }
+
+    @objc private func toggleCopyMode() {
+        let enabled = copyModeMenuItem.state != .on
+        setCopyMode(enabled)
+        onToggleCopyMode?(enabled)
+    }
+
+    @objc private func toggleReview() {
+        let enabled = reviewMenuItem.state != .on
+        setReview(enabled)
+        onToggleReview?(enabled)
     }
 
     func update(_ state: State) {

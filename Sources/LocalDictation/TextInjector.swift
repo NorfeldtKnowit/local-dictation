@@ -3,10 +3,25 @@ import CoreGraphics
 
 /// Inserts text into the focused application by stashing it on the
 /// pasteboard, posting a synthetic Cmd+V, and restoring the original
-/// pasteboard contents shortly afterwards.
+/// pasteboard contents shortly afterwards. `copy(_:)` is the alternative
+/// delivery: the text STAYS on the clipboard (no Cmd+V, no restore) for
+/// the user to paste wherever and whenever they want.
 enum TextInjector {
     private static let kVKCommand: CGKeyCode = 0x37
     private static let kVKANSI_V: CGKeyCode = 0x09
+
+    /// Copy-only delivery: replace the clipboard with the transcript and leave
+    /// it there. Deliberately no snapshot/restore — restoring would immediately
+    /// overwrite the very text the user asked to keep on the clipboard.
+    static func copy(_ text: String) {
+        guard !text.isEmpty else { return }
+        // Prefix logged so a transcript clobbered by the next copy staging is
+        // still recoverable from the log (mirrors the paste-path logging).
+        Log.info("copy \(text.count) chars to clipboard (copy-instead-of-paste mode): \(text.prefix(120))", "inject")
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
 
     static func paste(_ text: String) {
         guard !text.isEmpty else { return }

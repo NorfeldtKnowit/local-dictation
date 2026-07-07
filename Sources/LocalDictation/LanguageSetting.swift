@@ -2,9 +2,11 @@ import Foundation
 
 /// Thin UserDefaults wrapper for the persisted dictation preferences:
 /// the language pin ("auto" or an ISO code), the Accuracy Mode toggle
-/// (force Whisper for every language), and the Polish Transcript toggle
+/// (force Whisper for every language), the Polish Transcript toggle
 /// (LLM cleanup pass, on by default — it degrades to a no-op when the
-/// Apple Intelligence model is unavailable).
+/// Apple Intelligence model is unavailable), and the Copy Instead of
+/// Paste toggle (leave the transcript on the clipboard rather than
+/// injecting Cmd+V into the focused app).
 ///
 /// `defaults` is injectable so tests can drive an isolated
 /// `UserDefaults(suiteName:)` rather than the app's shared domain. The
@@ -15,6 +17,8 @@ struct LanguageSetting {
     static let languageKey = "language"        // "auto" | ISO code; default "auto"
     static let accuracyKey = "accuracyMode"    // Bool; default false
     static let polishKey = "polishTranscript"  // Bool; default true
+    static let copyKey = "copyInsteadOfPaste"  // Bool; default false
+    static let reviewKey = "reviewBeforePaste" // Bool; default false
 
     private let defaults: UserDefaults
 
@@ -35,5 +39,18 @@ struct LanguageSetting {
     var polishTranscript: Bool {
         get { defaults.object(forKey: Self.polishKey) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Self.polishKey) }
+    }
+
+    var copyInsteadOfPaste: Bool {
+        get { defaults.bool(forKey: Self.copyKey) }
+        nonmutating set { defaults.set(newValue, forKey: Self.copyKey) }
+    }
+
+    /// Review Before Paste: show the overlay offering raw vs terse-polished
+    /// text after each dictation. Effective only while `polishTranscript` is
+    /// on (without polish there is only one candidate — nothing to review).
+    var reviewBeforePaste: Bool {
+        get { defaults.bool(forKey: Self.reviewKey) }
+        nonmutating set { defaults.set(newValue, forKey: Self.reviewKey) }
     }
 }

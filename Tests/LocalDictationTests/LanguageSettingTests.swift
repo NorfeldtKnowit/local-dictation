@@ -23,6 +23,8 @@ final class LanguageSettingTests: XCTestCase {
         XCTAssertEqual(setting.language, "auto")
         XCTAssertFalse(setting.accuracyMode)
         XCTAssertTrue(setting.polishTranscript)   // default-ON, opt-out toggle
+        XCTAssertFalse(setting.copyInsteadOfPaste)
+        XCTAssertFalse(setting.reviewBeforePaste)
     }
 
     func testPinPersists() {
@@ -36,6 +38,18 @@ final class LanguageSettingTests: XCTestCase {
         let setting = LanguageSetting(defaults: defaults)
         setting.accuracyMode = true
         XCTAssertTrue(LanguageSetting(defaults: defaults).accuracyMode)
+    }
+
+    func testReviewPersists() {
+        let setting = LanguageSetting(defaults: defaults)
+        setting.reviewBeforePaste = true
+        XCTAssertTrue(LanguageSetting(defaults: defaults).reviewBeforePaste)
+    }
+
+    func testCopyModePersists() {
+        let setting = LanguageSetting(defaults: defaults)
+        setting.copyInsteadOfPaste = true
+        XCTAssertTrue(LanguageSetting(defaults: defaults).copyInsteadOfPaste)
     }
 
     func testPolishOptOutPersists() {
