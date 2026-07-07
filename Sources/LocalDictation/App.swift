@@ -81,6 +81,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var hotkey: HotkeyMonitor?
 
+    /// Live "listening" waveform HUD, shown while the push-to-talk is held.
+    private let levelMeter = LevelMeterOverlay()
+
     /// Pure recording/transcription bookkeeping (monotonic utterance IDs).
     /// All recorder/menu side effects hang off the Actions it returns.
     private var utterance = UtteranceStateMachine()
@@ -210,6 +213,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.utterance.isRecording { self.endRecording() }
         }
 
+        // Live level feed for the meter HUD: onLevel fires on the capture
+        // queue; the meter is AppKit, so hop to main. Cheap no-op when hidden.
+        recorder.onLevel = { [levelMeter] rms in
+            DispatchQueue.main.async { levelMeter.push(rms: rms) }
+        }
+
         menuBar.update(.loading("Requesting permissions…"))
 
         Task { @MainActor in
@@ -336,6 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try recorder.start()
             menuBar.update(.listening)
+            levelMeter.show()
             scheduleLostReleaseWatchdog(id: id)
         } catch {
             Log.error("recorder.start failed: \(error)", "app")
@@ -359,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         lostReleaseTimer?.invalidate()
         lostReleaseTimer = nil
+        levelMeter.hide()
         let samples = recorder.stop()
         Log.info("endRecording id=\(id) captured \(samples.count) samples (\(String(format: "%.2f", Double(samples.count) / AudioRecorder.targetSampleRate))s)", "app")
         saveLastUtterance(samples)

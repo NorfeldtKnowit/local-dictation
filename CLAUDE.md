@@ -24,8 +24,11 @@ transcribe → inject:
 - `HotkeyStateMachine.swift` — pure press/release/tap-disabled state machine.
 - `AudioRecorder.swift` — mic capture via **AVCaptureSession**, frozen: do
   not modify (see gotcha below). The freeze baseline is the Float32 output
-  pin (`1ee728e`, a pre-engine-v2 Bluetooth-HFP fix); the engine-v2 work
-  itself added nothing on top of it.
+  pin (`1ee728e`, a pre-engine-v2 Bluetooth-HFP fix). ONE sanctioned
+  additive hook since (2026-07-07): `onLevel`, a read-only RMS observer of
+  converted chunks feeding the level-meter HUD — it touches none of the
+  session/converter/teardown machinery the freeze protects. Keep it that
+  way: observers may be ADDED, capture behavior may not change.
 - `SpeechGate.swift` / `SpeechGateLogic.swift` — pre-ASR VAD guard: actor
   wrapper (degrades gracefully if Silero is unavailable) + pure decision/trim
   logic.
@@ -74,6 +77,12 @@ transcribe → inject:
   countdown, hover pause, AX-focused-window screen targeting.
 - `ReviewCoordinator.swift` — glue: executes ReviewQueueLogic commands
   against the overlay and `pasteSequencer.complete`.
+- `LevelMeterOverlay.swift` — live "listening" waveform HUD (Naples-yellow
+  bars) shown while push-to-talk is held; fed by `AudioRecorder.onLevel`;
+  pure display, no interaction. `LevelMeterMath.normalize` is the tested
+  pure part.
+- `ScreenLocator.swift` — shared "which screen is the user working on"
+  helper for the floating HUDs (AX focused window → mouse → screens[0]).
 - `LostReleaseWatchdog.swift` — pure watchdog decision: re-arm on a genuine
   long hold vs end on a lost release.
 - `WavLoader.swift` — CLI-only `AVAudioFile` → 16 kHz mono Float32 loader.

@@ -157,8 +157,9 @@ The first launch will:
 4. Switch to the gray waveform icon (ready).
 
 Then hold **Right Option** and talk. The icon turns **Naples yellow**
-while listening, switches to a spinner during transcription, then the
-text pastes into the focused app.
+while listening (a small floating waveform HUD shows your live mic level
+near the top of the screen), switches to a spinner during transcription,
+then the text pastes into the focused app.
 
 ## Why stable code signing matters
 
@@ -364,6 +365,8 @@ check rather than default CI.
 | `Sources/LocalDictation/ReviewQueueLogic.swift` | Pure Review-Before-Paste queue: FIFO, decide-exactly-once, deadman timeout (unit tested) |
 | `Sources/LocalDictation/ReviewOverlayController.swift` | Non-activating overlay panel: raw vs terse candidates, countdown, hover pause |
 | `Sources/LocalDictation/ReviewCoordinator.swift` | Glue: runs ReviewQueueLogic commands against the overlay + paste sequencer |
+| `Sources/LocalDictation/LevelMeterOverlay.swift` | Live mic-level waveform HUD while recording (display-only) |
+| `Sources/LocalDictation/ScreenLocator.swift` | Shared active-screen detection for the floating HUDs |
 | `Sources/LocalDictation/LostReleaseWatchdog.swift` | Pure watchdog decision: re-arm on genuine hold vs end on lost release |
 | `Sources/LocalDictation/WavLoader.swift` | `AVAudioFile` → 16 kHz mono Float32 for CLI fixtures (CLI-only; recorder untouched) |
 | `Sources/LocalDictation/CLI.swift` | `CLIArguments` parser + `CLIRunner` for `--transcribe-file` |

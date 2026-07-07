@@ -23,6 +23,14 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
     private let samplesQueue = DispatchQueue(label: "local-dictation.audio.samples")
     private var isRunning = false
 
+    /// ADDITIVE live-level observer: the RMS of each converted 16 kHz chunk
+    /// (~50 calls/s while recording), invoked on the capture queue — hop to
+    /// main before touching UI. Feeds the level-meter HUD. This is the one
+    /// sanctioned hook on this otherwise-frozen class (2026-07-07): it only
+    /// READS the already-converted chunk and touches none of the session /
+    /// converter / teardown machinery the freeze protects.
+    var onLevel: ((Float) -> Void)?
+
     // Diagnostics for a single session, reset on each start().
     private var sampleBufferCount = 0
     private var inputFrames = 0
@@ -205,6 +213,12 @@ final class AudioRecorder: NSObject, AVCaptureAudioDataOutputSampleBufferDelegat
                 if !loggedFirstChunk {
                     loggedFirstChunk = true
                     Log.debug("first converted chunk: in=\(inBuffer.frameLength)@\(inBuffer.format.sampleRate) -> out=\(frames)@\(targetFormat.sampleRate)", "audio")
+                }
+                // Additive observer only — see the onLevel declaration.
+                if let onLevel {
+                    var energy: Float = 0
+                    for sample in chunk { energy += sample * sample }
+                    onLevel((energy / Float(chunk.count)).squareRoot())
                 }
             }
 
