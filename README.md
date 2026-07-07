@@ -138,11 +138,20 @@ Two menu toggles control what happens once a transcript is ready
 ```bash
 git clone <this repo> ~/repos/local-dictation
 cd ~/repos/local-dictation
-swift build -c release        # ~50 s first time, fetches WhisperKit
+swift build -c release        # ~50 s first time, fetches WhisperKit + MLX
+scripts/build-metallib.sh     # compile MLX's Metal shaders (xcodebuild; needs
+                              # full Xcode, several minutes, one-time)
 scripts/build-app.sh          # assemble + sign dist/local-dictation.app
 scripts/install-app.sh        # copy + sign into ~/Applications
 scripts/install-daemon.sh     # install LaunchAgent, start it
 ```
+
+`build-metallib.sh` is required before `build-app.sh`: `swift build` can't
+compile MLX's Metal shaders, and `build-app.sh` refuses to assemble without
+the resulting `.build/mlx.metallib` (the Qwen review-polish backend crashes
+the process without it). It needs full Xcode, not just Command Line Tools,
+and is a one-time cost cached in `.build/` — re-run it (`--force`) only after
+bumping mlx-swift.
 
 The daemon runs the **app bundle** in `~/Applications`, not the raw SPM
 binary, so `build-app.sh` + `install-app.sh` are the steps that matter.
@@ -309,6 +318,11 @@ scripts/install-app.sh
 launchctl kickstart -k gui/$(id -u)/com.norfeldt.local-dictation
 ```
 
+If a pull bumped mlx-swift, re-run `scripts/build-metallib.sh --force` before
+`build-app.sh` — the metallib is version-locked to the mlx-swift checkout.
+Otherwise the cached `.build/mlx.metallib` is reused and no xcodebuild pass is
+needed.
+
 ## Testing
 
 ```bash
@@ -373,6 +387,7 @@ check rather than default CI.
 | `Sources/LocalDictation/TextInjector.swift` | `NSPasteboard` + Cmd+V injection, AX-trust check |
 | `Sources/LocalDictation/Permissions.swift` | Mic + Accessibility prompts |
 | `Sources/LocalDictation/Log.swift` | Tee logger to stderr + file + unified logging |
+| `scripts/build-metallib.sh` | Compile MLX's Metal shaders (`xcodebuild`) into `.build/mlx.metallib`; one-time, required before `build-app.sh` |
 | `scripts/build-app.sh` | Assemble + sign `dist/local-dictation.app` |
 | `scripts/install-app.sh` | Copy + sign the app into `~/Applications` |
 | `scripts/sign.sh` | Sign the raw `.build` binary (stable identity) |

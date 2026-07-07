@@ -16,14 +16,21 @@ Check, and report anything missing to the user before proceeding:
 
 - macOS 14+ on Apple Silicon (`sw_vers`, `uname -m`). The optional AI
   polish stage additionally needs macOS 26+ with Apple Intelligence.
-- Swift toolchain: `swift --version` (Xcode or Command Line Tools).
+- **Full Xcode**, not just Command Line Tools: `xcode-select -p` should
+  point at `Xcode.app` (`sudo xcode-select -s /Applications/Xcode.app`
+  if it points at CommandLineTools). Step 3's `scripts/build-metallib.sh`
+  runs `xcodebuild` to compile MLX's Metal shaders, which the CLT-only
+  toolchain cannot do.
+- Swift toolchain: `swift --version` (bundled with Xcode).
 - An **Apple Development certificate** in the keychain:
   `security find-identity -v -p codesigning | grep "Apple Development"`.
   If none: the user must create one in Xcode → Settings → Accounts →
   Manage Certificates (a free Apple ID account suffices). Do NOT fall
   back to ad-hoc signing; TCC grants would drop on every rebuild.
-- Disk: roughly 4 GB free for models (Parakeet ~1 GB, Whisper
-  large-v3-turbo ~1.6 GB, optional Silero VAD is small).
+- Disk: roughly 4 GB free for the ASR models (Parakeet ~1 GB, Whisper
+  large-v3-turbo ~1.6 GB, Silero VAD is small), plus ~2.5 GB more if the
+  user wants Review-Before-Paste polish in a non-English language, which
+  pulls the Qwen3-4B MLX model (see step 7).
 
 ## 2. Build and test
 
@@ -38,10 +45,19 @@ are a stop-the-line event; report them.
 ## 3. Bundle, install, start the daemon
 
 ```bash
-scripts/build-app.sh     # assemble + sign dist/local-dictation.app
-scripts/install-app.sh   # copy + sign into ~/Applications
+scripts/build-metallib.sh   # compile MLX's Metal shaders via xcodebuild;
+                            # several minutes, ONE-TIME (cached in .build/)
+scripts/build-app.sh        # assemble + sign dist/local-dictation.app
+scripts/install-app.sh      # copy + sign into ~/Applications
 scripts/install-daemon.sh
 ```
+
+`build-metallib.sh` is mandatory and must come first: `swift build` cannot
+compile MLX's `.metal` sources, and `build-app.sh` hard-errors ("Missing
+.build/mlx.metallib") without the artifact it produces. It needs full Xcode
+(step 1) and is cached — re-run it only after bumping mlx-swift
+(`scripts/build-metallib.sh --force`). Verify: `.build/mlx.metallib` exists
+and `build-app.sh` completes.
 
 Known trap: `install-daemon.sh`'s bootstrap step fails with
 `5: Input/output error` if the agent is already registered. Then either
@@ -98,12 +114,22 @@ Headless check without any permissions (also good on CI):
 scripts/make-fixtures.sh && scripts/test-cli.sh
 ```
 
-## 7. Optional: AI transcript polish
+## 7. Optional: AI transcript polish + Review Before Paste
 
-Requires Apple Intelligence enabled (System Settings → Apple
-Intelligence & Siri) and its model downloaded. After enabling,
-`kickstart -k` the daemon and confirm the `polish inactive:` log line
-is gone. Without it the polish stage is a safe no-op.
+The inline **Polish Transcript** stage (menu toggle, on by default) runs on
+Apple's on-device Foundation model. Requires Apple Intelligence enabled
+(System Settings → Apple Intelligence & Siri) and its model downloaded.
+After enabling, `kickstart -k` the daemon and confirm the `polish inactive:`
+log line is gone. Without it the polish stage is a safe no-op.
+
+**Review Before Paste** (menu toggle, off by default) streams a terse rewrite
+into a floating overlay before pasting. English rewrites reuse the Apple
+Foundation model; every other language (Danish included) runs a local
+**Qwen3-4B-Instruct** via MLX — a one-time ~2.5 GB download to the Hugging
+Face cache the first time review mode runs. This is why `build-metallib.sh`
+(step 3) is mandatory even though inline polish alone doesn't exercise MLX.
+Set `LOCAL_DICTATION_PRELOAD_QWEN=0` in the LaunchAgent plist to defer the
+download to first use instead of preloading at launch.
 
 ## 8. Optional: make the companion skill global
 
