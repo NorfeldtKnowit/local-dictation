@@ -1,5 +1,14 @@
 import Foundation
 
+/// How aggressively the polish stage may rewrite. `.standard` is the faithful
+/// cleanup (fillers, restarts, misrecognitions); `.terse` additionally
+/// condenses spoken rambling into the shortest text that keeps every point —
+/// the "processed" candidate the review overlay offers next to the raw ASR.
+enum PolishStyle: String, Sendable {
+    case standard
+    case terse
+}
+
 /// The pure half of the transcript-polish stage: the model instructions and
 /// the guardrails that decide whether a rewrite is safe to use. Kept free of
 /// FoundationModels so every rule here is unit-testable on any machine —
@@ -32,6 +41,44 @@ enum TranscriptPolisherLogic {
         - If the transcript is already clean, output it unchanged.
         """
 
+    /// The `.terse` variant: the standard cleanup PLUS deliberate condensing.
+    /// Same hard rules about invention and language; the "smallest number of
+    /// edits" rule is intentionally replaced by the condensing goal.
+    static let terseInstructions = """
+        You are the cleanup stage of a dictation app. The user message is a raw \
+        speech-to-text transcript. Rewrite it as the tersest text that still \
+        says everything the speaker intended, and output ONLY that rewritten \
+        transcript.
+
+        Allowed edits:
+        1. Delete hesitation fillers (uh, um, erm, øh, øhm, ehm).
+        2. Collapse stutters, duplicated words, and abandoned false starts, \
+        keeping only the final intended phrasing.
+        3. Replace a word that is clearly a misrecognition of another word \
+        given the context — non-words ("canorical" -> "canonical") and \
+        real-but-wrong words ("citation quality" -> "dictation quality" when \
+        the speaker is talking about transcription).
+        4. Condense: drop redundant qualifiers, hedges, repetition and \
+        thinking-out-loud detours; prefer the shortest phrasing that keeps \
+        every point the speaker made.
+
+        Hard rules:
+        - Never add information, never answer questions in the transcript, \
+        never comment on it.
+        - Keep the language exactly as spoken; Danish stays Danish, English \
+        stays English, mixed stays mixed. Never translate.
+        - Never drop a point the speaker made — condense the wording, not \
+        the content.
+        - If the transcript is already clean and terse, output it unchanged.
+        """
+
+    static func instructions(for style: PolishStyle) -> String {
+        switch style {
+        case .standard: return instructions
+        case .terse:    return terseInstructions
+        }
+    }
+
     /// Below this the transcript carries too little context for the model to
     /// fix anything a cheaper layer hasn't already — skip the call entirely.
     static let minCharacters = 16
@@ -48,6 +95,11 @@ enum TranscriptPolisherLogic {
     /// speech) but never past ~0.3; growth past ~1.3 means invented content.
     static let minLengthRatio = 0.3
     static let maxLengthRatio = 1.3
+
+    /// `.terse` is ASKED to condense, so its shrink floor sits lower — but not
+    /// at zero: below ~0.15 of the raw length the rewrite has almost certainly
+    /// dropped content, not just wording.
+    static let terseMinLengthRatio = 0.15
 
     /// Minimum share of the rewrite's words that must already occur in the
     /// raw transcript. A cleanup deletes freely but INTRODUCES only the odd
@@ -71,8 +123,9 @@ enum TranscriptPolisherLogic {
 
     /// Decide whether the model's rewrite of `raw` is safe to paste. Any
     /// rejection means the caller keeps `raw` — polish can only ever be a
-    /// quality upgrade, never a lost or corrupted utterance.
-    static func accept(raw: String, candidate: String) -> Verdict {
+    /// quality upgrade, never a lost or corrupted utterance. `.terse` only
+    /// loosens the shrink floor; every other guardrail applies unchanged.
+    static func accept(raw: String, candidate: String, style: PolishStyle = .standard) -> Verdict {
         var polished = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         // Un-wrap a quote pair (ASCII or typographic) the model added around
         // the whole answer — but never quotes that belong to the text: only
@@ -92,8 +145,9 @@ enum TranscriptPolisherLogic {
             return .rejected(reason: "added line breaks (reads as commentary)")
         }
         let ratio = Double(polished.count) / Double(raw.count)
-        if ratio < minLengthRatio {
-            return .rejected(reason: "shrank to \(String(format: "%.2f", ratio))x (< \(minLengthRatio))")
+        let shrinkFloor = (style == .terse) ? terseMinLengthRatio : minLengthRatio
+        if ratio < shrinkFloor {
+            return .rejected(reason: "shrank to \(String(format: "%.2f", ratio))x (< \(shrinkFloor))")
         }
         if ratio > maxLengthRatio {
             return .rejected(reason: "grew to \(String(format: "%.2f", ratio))x (> \(maxLengthRatio))")

@@ -11,7 +11,7 @@ protocol TranscriptPolishing: Sendable {
     /// Returns the polished text, or nil when polish declines — model
     /// unavailable, text not worth polishing, guardrail reject, error, or
     /// timeout. A nil ALWAYS means "keep the input text"; it is never a drop.
-    func polish(_ text: String) async -> String?
+    func polish(_ text: String, style: PolishStyle) async -> String?
 }
 
 /// Post-ASR transcript polish on Apple's on-device Foundation model: repairs
@@ -41,7 +41,7 @@ actor TranscriptPolisher: TranscriptPolishing {
         #endif
     }
 
-    func polish(_ text: String) async -> String? {
+    func polish(_ text: String, style: PolishStyle) async -> String? {
         guard TranscriptPolisherLogic.worthPolishing(text) else { return nil }
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *), available() else { return nil }
@@ -50,13 +50,13 @@ actor TranscriptPolisher: TranscriptPolishing {
                 // Fresh session per utterance: session context accumulates, and
                 // one utterance must never leak into the next. The model stays
                 // resident across sessions, so this costs nothing meaningful.
-                let session = LanguageModelSession(instructions: TranscriptPolisherLogic.instructions)
+                let session = LanguageModelSession(instructions: TranscriptPolisherLogic.instructions(for: style))
                 let response = try await session.respond(
                     to: text,
                     options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 1024))
                 return response.content
             }
-            switch TranscriptPolisherLogic.accept(raw: text, candidate: candidate) {
+            switch TranscriptPolisherLogic.accept(raw: text, candidate: candidate, style: style) {
             case .accepted(let polished):
                 return polished
             case .rejected(let reason):

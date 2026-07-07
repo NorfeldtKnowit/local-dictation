@@ -18,6 +18,10 @@ actor DictationPipeline {
         /// transcript was suppressed by the hallucination filter (distinguish the
         /// two via `gate` and `filtered`).
         let text: String
+        /// The filtered ASR text BEFORE polish (layers 1-3 applied, layer 4 not).
+        /// Equal to `text` whenever `polished` is false. Kept so a review UI can
+        /// offer the raw transcript next to the polished rewrite.
+        let asrText: String
         /// Which engine ran, or nil when no ASR ran at all (the utterance was
         /// gated out before routing).
         let engine: EngineKind?
@@ -130,6 +134,9 @@ actor DictationPipeline {
     ///     `--no-polish`). Only ever a quality upgrade: any decline — model
     ///     unavailable, guardrail reject, error, timeout — keeps the filtered
     ///     ASR text. No-op when the pipeline was built without a polisher.
+    ///   - polishStyle: how aggressively layer 4 may rewrite. `.standard` is
+    ///     the faithful cleanup; `.terse` (used by the review overlay) also
+    ///     condenses. Ignored when `polish` is false.
     ///   - onColdLoad: fired (once, before the blocking warm-up) when the routed
     ///     engine isn't warm yet, so the GUI can show "Loading … model (first
     ///     use)…". Never fired for an already-warm engine.
@@ -140,6 +147,7 @@ actor DictationPipeline {
                  bypassGate: Bool = false,
                  bypassFilter: Bool = false,
                  polish: Bool = false,
+                 polishStyle: PolishStyle = .standard,
                  onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> Outcome {
         // Layers 1+2 (duration + VAD). Only `.pass` (trimmed) or `.vadUnavailable`
         // (raw, fail-open) proceed to ASR; `.tooShort` / `.silence` short-circuit
@@ -149,7 +157,7 @@ actor DictationPipeline {
             ? SpeechGate.Outcome(decision: .vadUnavailable, audio: samples)
             : await gate.evaluate(samples)
         guard gated.decision == .pass || gated.decision == .vadUnavailable else {
-            return Outcome(text: "", engine: nil, gate: gated.decision,
+            return Outcome(text: "", asrText: "", engine: nil, gate: gated.decision,
                            filtered: false, inferenceSeconds: 0)
         }
 
@@ -261,14 +269,14 @@ actor DictationPipeline {
         var text = cleaned
         var polished = false
         if polish, !cleaned.isEmpty, let polisher,
-           let refined = await polisher.polish(cleaned),
+           let refined = await polisher.polish(cleaned, style: polishStyle),
            refined != cleaned {   // verbatim echo == "already clean", not a rewrite
             // The pre-polish ASR text must stay recoverable from the log.
-            Log.info("polish rewrote: \"\(cleaned.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
+            Log.info("polish (\(polishStyle.rawValue)) rewrote: \"\(cleaned.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
             text = refined
             polished = true
         }
-        return Outcome(text: text, engine: usedKind, gate: gated.decision,
+        return Outcome(text: text, asrText: cleaned, engine: usedKind, gate: gated.decision,
                        filtered: cleaned.isEmpty && !raw.isEmpty,
                        inferenceSeconds: inference,
                        rescue: rescue, polished: polished)

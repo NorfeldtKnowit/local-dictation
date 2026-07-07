@@ -60,14 +60,16 @@ private actor FakePolisher: TranscriptPolishing {
     private let result: String?
     private(set) var polishCount = 0
     private(set) var lastInput: String?
+    private(set) var lastStyle: PolishStyle?
 
     init(result: String?) { self.result = result }
 
     func warmUp() async {}
 
-    func polish(_ text: String) async -> String? {
+    func polish(_ text: String, style: PolishStyle) async -> String? {
         polishCount += 1
         lastInput = text
+        lastStyle = style
         return result
     }
 }
@@ -669,6 +671,42 @@ final class DictationPipelineTests: XCTestCase {
         // The polisher must see the FILTERED text (layers 1-3 already applied).
         let input = await polisher.lastInput
         XCTAssertEqual(input, asrText)
+    }
+
+    func testOutcomeCarriesPrePolishText() async throws {
+        // The review overlay needs BOTH candidates: asrText must hold the
+        // filtered layers-1-3 text even when polish rewrote `text`.
+        let asrText = "So basically I want to refactor the parser module."
+        let parakeet = FakeEngine(kind: .parakeet, output: asrText, startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: "I want to refactor the parser module.")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        let out = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                             polish: true)
+
+        XCTAssertTrue(out.polished)
+        XCTAssertEqual(out.asrText, asrText)
+        XCTAssertEqual(out.text, "I want to refactor the parser module.")
+    }
+
+    func testPolishStyleDefaultsToStandardAndPlumbsTerse() async throws {
+        let parakeet = FakeEngine(kind: .parakeet, output: "some plain dictated text here", startWarm: true, confidence: 0.95)
+        let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
+        let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
+        let polisher = FakePolisher(result: "some plain dictated text")
+        let pipeline = makePipeline(parakeet: parakeet, whisper: whisper, gate: gate, polisher: polisher)
+
+        _ = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                       polish: true)
+        var style = await polisher.lastStyle
+        XCTAssertEqual(style, .standard)
+
+        _ = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
+                                       polish: true, polishStyle: .terse)
+        style = await polisher.lastStyle
+        XCTAssertEqual(style, .terse)
     }
 
     func testPolishOffByDefault() async throws {

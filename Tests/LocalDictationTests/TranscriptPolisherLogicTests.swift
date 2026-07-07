@@ -103,6 +103,41 @@ final class TranscriptPolisherLogicTests: XCTestCase {
         }
     }
 
+    func testTerseAcceptsShrinkStandardRejects() {
+        // A condensed rewrite in the 0.15-0.3 ratio band: exactly what `.terse`
+        // is asked to produce and what `.standard` must keep rejecting.
+        let raw = "I think that we should, I think that we should probably really just go with option two here, "
+                + "that is, with option two out of the two options that we talked about before."
+        let condensed = "We should go with option two."
+        let ratio = Double(condensed.count) / Double(raw.count)
+        XCTAssertTrue(ratio > TranscriptPolisherLogic.terseMinLengthRatio
+                   && ratio < TranscriptPolisherLogic.minLengthRatio,
+                      "fixture must sit between the two shrink floors")
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: condensed) else {
+            return XCTFail("standard style must reject a sub-0.3x shrink")
+        }
+        guard case .accepted(condensed) = TranscriptPolisherLogic.accept(raw: raw, candidate: condensed,
+                                                                         style: .terse) else {
+            return XCTFail("terse style must accept a condensed rewrite above its floor")
+        }
+    }
+
+    func testTerseStillRejectsExtremeShrink() {
+        let raw = "I think that we should, I think that we should probably really just go with option two here, "
+                + "that is, with option two out of the two options that we talked about before."
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: "Two.", style: .terse) else {
+            return XCTFail("terse must still reject a shrink below its own floor")
+        }
+    }
+
+    func testStyleInstructionsDiffer() {
+        XCTAssertEqual(TranscriptPolisherLogic.instructions(for: .standard),
+                       TranscriptPolisherLogic.instructions)
+        XCTAssertNotEqual(TranscriptPolisherLogic.instructions(for: .terse),
+                          TranscriptPolisherLogic.instructions(for: .standard))
+        XCTAssertFalse(TranscriptPolisherLogic.terseInstructions.isEmpty)
+    }
+
     func testTranslationRejected() {
         let raw = "Komplet omskrivning af forgreningen, så vi kan starte forfra med det samme."
         let translated = "Complete rewrite of the branch, so we can start over right away."
