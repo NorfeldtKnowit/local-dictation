@@ -1,7 +1,7 @@
 .build/
 .swiftpm/
 .DS_Store
-Package.resolved
+# Package.resolved is COMMITTED (supply-chain lock; review its diff on every change)
 *.xcodeproj/
 dist/
 Tests/fixtures/
