@@ -66,10 +66,16 @@ private actor FakePolisher: TranscriptPolishing {
 
     func warmUp() async {}
 
-    func polish(_ text: String, style: PolishStyle) async -> String? {
+    func polish(_ text: String, style: PolishStyle,
+                onPartial: (@Sendable (String) -> Void)?) async -> String? {
         polishCount += 1
         lastInput = text
         lastStyle = style
+        // Streaming fake: one partial (half the result) before the final, so
+        // the review-path test can assert partials flow through.
+        if let onPartial, let result {
+            onPartial(String(result.prefix(result.count / 2)))
+        }
         return result
     }
 }

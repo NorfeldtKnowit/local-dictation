@@ -74,17 +74,24 @@ actor DictationPipeline {
     private let whisper: any TranscriptionEngine    // Transcriber
     private let gate: GateProviding                 // SpeechGate (or a test fake)
     private let polisher: (any TranscriptPolishing)?  // TranscriptPolisher (or a test fake)
+    /// Optional separate backend for `polishText` (the review path). The GUI
+    /// passes `RoutedPolisher` (Apple FM for English, MLX Qwen for the rest);
+    /// `process()`'s inline polish deliberately does NOT use it — without the
+    /// review HUD there is no feedback surface for MLX's slower cold path.
+    private let reviewPolisher: (any TranscriptPolishing)?
     private let rescueConfidence: Double
 
     init(parakeet: any TranscriptionEngine,
          whisper: any TranscriptionEngine,
          gate: GateProviding,
          polisher: (any TranscriptPolishing)? = nil,
+         reviewPolisher: (any TranscriptPolishing)? = nil,
          rescueConfidence: Double = DictationPipeline.defaultRescueConfidence) {
         self.parakeet = parakeet
         self.whisper = whisper
         self.gate = gate
         self.polisher = polisher
+        self.reviewPolisher = reviewPolisher
         self.rescueConfidence = rescueConfidence
     }
 
@@ -280,6 +287,22 @@ actor DictationPipeline {
                        filtered: cleaned.isEmpty && !raw.isEmpty,
                        inferenceSeconds: inference,
                        rescue: rescue, polished: polished)
+    }
+
+    /// Layer 4 alone, for the review path: the caller ran `process(polish:
+    /// false)`, showed the HUD with the raw text, and now streams the rewrite
+    /// into it. Same decline semantics as the inline polish — nil means "keep
+    /// the ASR text" (unavailable, guardrail reject, timeout, verbatim echo).
+    /// Routing (Apple FM vs MLX) lives in the injected `reviewPolisher`.
+    func polishText(_ text: String,
+                    style: PolishStyle,
+                    onPartial: (@Sendable (String) -> Void)? = nil) async -> String? {
+        guard !text.isEmpty, let polisher = reviewPolisher ?? polisher else { return nil }
+        guard let refined = await polisher.polish(text, style: style, onPartial: onPartial),
+              refined != text else { return nil }
+        // The pre-polish ASR text must stay recoverable from the log.
+        Log.info("polish (\(style.rawValue)) rewrote: \"\(text.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
+        return refined
     }
 
     private func warmWhisper(onColdLoad: (@Sendable (EngineKind) -> Void)?) async throws {

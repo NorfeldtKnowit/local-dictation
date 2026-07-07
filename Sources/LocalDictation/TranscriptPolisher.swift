@@ -4,14 +4,26 @@ import FoundationModels
 #endif
 
 /// Seam for pipeline layer 4 so `DictationPipeline` (and its tests) never
-/// touch FoundationModels directly.
+/// touch FoundationModels / MLX directly.
 protocol TranscriptPolishing: Sendable {
     /// Best-effort model page-in so the first real polish doesn't pay it.
     func warmUp() async
     /// Returns the polished text, or nil when polish declines — model
     /// unavailable, text not worth polishing, guardrail reject, error, or
     /// timeout. A nil ALWAYS means "keep the input text"; it is never a drop.
-    func polish(_ text: String, style: PolishStyle) async -> String?
+    ///
+    /// `onPartial` (optional) receives the ACCUMULATED raw model output as it
+    /// streams — display-only feedback for the review HUD. Partials are NOT
+    /// guardrail-checked; only the returned final text is safe to paste.
+    /// Backends without streaming simply never call it.
+    func polish(_ text: String, style: PolishStyle,
+                onPartial: (@Sendable (String) -> Void)?) async -> String?
+}
+
+extension TranscriptPolishing {
+    func polish(_ text: String, style: PolishStyle) async -> String? {
+        await polish(text, style: style, onPartial: nil)
+    }
 }
 
 /// Post-ASR transcript polish on Apple's on-device Foundation model: repairs
@@ -41,7 +53,10 @@ actor TranscriptPolisher: TranscriptPolishing {
         #endif
     }
 
-    func polish(_ text: String, style: PolishStyle) async -> String? {
+    /// `onPartial` is accepted but unused: the FM call is fast enough (~1 s)
+    /// that streaming feedback adds nothing.
+    func polish(_ text: String, style: PolishStyle,
+                onPartial: (@Sendable (String) -> Void)?) async -> String? {
         guard TranscriptPolisherLogic.worthPolishing(text) else { return nil }
         #if canImport(FoundationModels)
         guard #available(macOS 26.0, *), available() else { return nil }
