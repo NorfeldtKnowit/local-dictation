@@ -55,14 +55,26 @@ transcribe → inject:
   because MLX's cold spins need the HUD's feedback surface. Streams
   accumulated output via the protocol's `onPartial` (display-only; only
   the final, guardrail-checked text may paste).
-- `TranscriptPolisherLogic.swift` — pure polish instructions + accept
-  guardrails (length ratio, no added newlines, language-flip reject); two
-  `PolishStyle`s: `.standard` (faithful cleanup) and `.terse` (condensing,
-  looser 0.15 shrink floor) — terse is what the review overlay offers.
+- `TranscriptPolisherLogic.swift` — pure polish instructions
+  (`instructions`/`terseInstructions` constants) + `accept` guardrails keyed
+  off a `GuardrailProfile`: `.faithful` (full guards), `.terse` (looser 0.15
+  shrink floor), `.stylistic` (widened 0.2-2.5 band; DROPS the word-overlap
+  and added-newline guards so slang/emoji restyles pass, keeps empty + the
+  never-translate language guard).
+- `PromptTemplate.swift` — `PromptTemplate` (id/name/instructions/profile) +
+  `GuardrailProfile`. Built-ins `.standard` (faithful, inline default) and
+  `.terse` (default review row). Threads through the polish path in place of
+  the old `PolishStyle` enum.
+- `PromptTemplateStore.swift` — built-ins + user `.md` files from
+  `~/Library/Application Support/local-dictation/templates/` (stem = name,
+  contents = instructions, profile `.stylistic`; a file id matching a built-in
+  overrides it). `ensureSeeded()` writes GenZ/Millennial/Boomer starters
+  once; `openTemplatesFolder()` reveals it in Finder. The `Polish Style ▸`
+  menu picks the template for the review row (`LanguageSetting.selectedTemplate`).
 - `DictationPipeline.swift` — actor tying gate → route → transcribe → filter
   → polish together; the single reuse point for both GUI and CLI.
 - `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy
-  mode + polish toggle.
+  mode + polish toggle + selected polish template.
 - `UtteranceStateMachine.swift` — pure recording/transcription bookkeeping
   with monotonic IDs.
 - `PasteSequencer.swift` — pure paste ordering: flushes outcomes in strict
@@ -70,11 +82,45 @@ transcribe → inject:
 - `ReviewQueueLogic.swift` — pure Review-Before-Paste queue: FIFO, one
   overlay at a time, decide-exactly-once per utterance ID, id-guarded
   deadman timeout (default = raw text, so the terse rewrite never pastes
-  unreviewed).
-- `ReviewOverlayController.swift` — AppKit half of review: non-activating
-  borderless NSPanel (never key/main — the caret must stay in the target
-  app; never add `NSApp.activate` here), clickable raw/terse rows,
-  countdown, hover pause, AX-focused-window screen targeting.
+  unreviewed). `Choice.edited(String)` carries a hand-edited candidate;
+  `beginEdit`/`cancelEdit` + the `isEditing` flag SUSPEND the countdown while
+  the inline editor is open (a fired deadman is ignored and NOT re-armed).
+  An abandoned edit leaves the utterance pending and later ones queued — the
+  same sanctioned tradeoff as the `.never` auto-insert policy.
+- `ReviewOverlayController.swift` — AppKit half of review, TWO windows:
+  - `ReviewOverlayPanel` — the review HUD: non-activating borderless NSPanel,
+    STRICTLY never key/main (the caret must stay in the target app; never add
+    `NSApp.activate` for this panel). Clickable raw/terse rows each with a
+    pencil (edit-before-insert), countdown, hover pause, AX-focused-window
+    screen targeting.
+  - `EditPanel` — a SEPARATE genuinely-activating borderless window shown only
+    while hand-editing. Editing does NOT reuse the review panel: a
+    `.nonactivatingPanel` sets the WindowServer `kCGSPreventsActivationTagBit`
+    at init (uncleared by later style-mask toggling), so it can never be the
+    *activated* app the system Character Viewer targets — in-process key events
+    route to it (bare typing works) but the out-of-process emoji picker can't.
+    The `EditPanel` is activating, becomes key+main, and its `EditTextView` is
+    the first responder for typing and the palette. Buttons: Copy (⌘⏎ — to the
+    clipboard, no paste), Save (⌘S — folds the edit back into review), Cancel
+    (esc). `enterEditMode` captures `savedFrontApp` and orders the review panel
+    out; `leaveEditMode` orders the editor out and re-fronts the target so the
+    caret returns there (Copy/Save/Cancel all pass through it). Edit mode never
+    pastes, so no `NSApp.setActivationPolicy` flip is needed — the app stays a
+    never-in-Dock `.accessory` throughout (a `.regular` flip was tried and
+    removed: it showed a Dock icon and did NOT fix emoji).
+  - **Emoji / Character Viewer**: `⌃⌘Space` is the key-equivalent of the
+    "Emoji & Symbols" item AppKit auto-adds to an app's Edit menu — which a
+    menu-less LaunchAgent accessory app lacks, so the shortcut has nothing to
+    fire and the picker never opens (confirmed live: even fully `.regular` +
+    active + focused, nothing happened). Fix: `EditTextView.keyDown` intercepts
+    `⌃⌘Space` and calls `NSApplication.orderFrontCharacterPalette(nil)`
+    directly (verified live 2026-07-21). Do NOT reintroduce the `.regular`
+    flip or a nonactivating editor "to fix emoji" — neither was the cause.
+- `TranscriptDiffLogic.swift` — pure word-level raw↔terse diff feeding the
+  overlay's highlights: dropped words struck + dimmed in RAW, new/changed
+  words tinted in TERSE; applied only to the FINAL rewrite (streamed
+  partials stay plain — a half-streamed rewrite would read as one giant
+  deletion).
 - `ReviewCoordinator.swift` — glue: executes ReviewQueueLogic commands
   against the overlay and `pasteSequencer.complete`.
 - `LevelMeterOverlay.swift` — live "listening" waveform HUD (Naples-yellow
@@ -103,16 +149,29 @@ The running daemon executes the **app bundle** at
 2026-07-07 — review its diff on every change; MLX model weights are further
 pinned to an exact HF revision in `MLXPolisher`). `build-app.sh` copies the
 build's SPM resource bundles (e.g. `swift-transformers_Hub.bundle`) into
-`Contents/Resources` — `Bundle.module` fatalErrors without them. MLX needs no
-metallib bundle: mlx-swift uses runtime-JIT-compiled Metal kernels (the
-package excludes `nojit_kernels.cpp`). The full cycle:
+`Contents/Resources` — `Bundle.module` fatalErrors without them. MLX DOES need
+a metallib: plain `swift build` cannot compile mlx-swift's `.metal` sources
+(only `xcodebuild` can), so MLX aborts at first GPU use with "Failed to load
+the default metallib" unless `scripts/build-metallib.sh` has produced
+`.build/mlx.metallib` — which `build-app.sh` copies into the bundle and errors
+out without. The script is idempotent (compiles only if the metallib is missing
+or `--force`); the ~minutes-long `xcodebuild` pass runs only on a cold cache or
+after bumping mlx-swift. The full cycle:
 
 ```bash
 swift build -c release
+scripts/build-metallib.sh   # compile MLX Metal shaders -> .build/mlx.metallib (cached)
 scripts/build-app.sh        # assemble + sign dist/local-dictation.app
 scripts/install-app.sh      # copy + sign into ~/Applications
 launchctl kickstart -k "gui/$(id -u)/com.norfeldt.local-dictation"
 ```
+
+**ALWAYS run this full deploy cycle after changing any source the daemon runs,
+without being asked.** The running daemon is the app bundle in `~/Applications`,
+not `.build`, so an un-deployed change is invisible to live testing. `swift
+build`/`swift test` alone verify compilation and pure logic only. After the
+`kickstart`, confirm the restart in `~/Library/Logs/local-dictation.log`
+(`model ready` + `hotkey tap started=true`) before reporting the change live.
 
 `scripts/install-daemon.sh` (re)installs the LaunchAgent plist. Its
 `bootstrap` step fails with `5: Input/output error` if the agent is still
@@ -305,22 +364,40 @@ Two menu toggles sit AFTER the pipeline, purely in the delivery path
 off; the CLI constructs none of this — its zero-TCC guarantee holds):
 
 - **Review Before Paste** shows the HUD the moment ASR finishes (RAW row
-  immediately) and STREAMS the terse rewrite into the second row:
+  immediately) and STREAMS the rewrite into the second row:
   `process(polish: false)` → `reviewCoordinator.enqueue` → the pipeline's
-  separate `polishText(_:style:onPartial:)` → `polishFinished`, which
-  either completes with raw instantly (decline/echo — no single-candidate
-  overlay) or arms the countdown. RAW is clickable while streaming. The
-  pending state is bounded by the polish backends' own timeouts (6 s FM /
-  30 s MLX), so `polishFinished` ALWAYS arrives and the sequencer can't
-  stall. Design invariants (all landed after an adversarial design
-  review — don't relitigate them casually):
-  - **Mouse-only selection, no event tap.** A keyboard scheme (bare or
-    modifier-chorded keys via an active CGEvent tap) was rejected: bare keys
-    swallow real typing (Return/Esc especially), Right-Option chords collide
-    with push-to-talk, secure-input contexts silently blind taps, and the
-    active-tap disable/re-enable machinery is a failure surface the panel
-    doesn't have. `.nonactivatingPanel` delivers clicks WITHOUT activating
-    us, so the caret never leaves the target app — the actual requirement.
+  separate `polishText(_:template:onPartial:)` → `polishFinished`, which
+  either shows two candidates (rewrite + RAW) and arms the countdown, or —
+  when there is no distinct rewrite — shows the RAW ALONE for review. RAW is
+  clickable while streaming. The pending state is bounded by the polish
+  backends' own timeouts (6 s FM / 30 s MLX), so `polishFinished` ALWAYS
+  arrives and the sequencer can't stall. Design invariants (all landed after
+  an adversarial design review — don't relitigate them casually):
+  - **INVARIANT — review always reviews; it NEVER silently pastes.** When the
+    setting is on, EVERY non-empty utterance shows the overlay before anything
+    is inserted, including when polish declines/echoes/ times out (guardrail
+    reject, verbatim echo, model unavailable). A decline is a RAW-ONLY review
+    (`ReviewRequest.polish == .none`: one row, editable/dismissable, deadman
+    auto-inserts raw) — NOT a direct paste. Regression watch: any code path
+    where `polishFinished(nil)` (or a queued `.none`) resolves to `.complete`
+    without a preceding `.show` breaks "Review Before Paste" and is a bug. The
+    old "no single-candidate overlay, paste raw instantly" behavior was
+    deliberately reversed 2026-07-21 once edit-before-insert made a raw-only
+    overlay useful. Stylistic templates on non-English input must keep the
+    input language (see the prominent `languageRule` in the starter prompts);
+    a translation trips the polish language-guard and (correctly) collapses the
+    restyle to a raw-only review, which reads as "review didn't do anything".
+  - **Mouse-only SELECTION, no event tap.** A keyboard scheme for *picking a
+    candidate* (bare or modifier-chorded keys via an active CGEvent tap) was
+    rejected: bare keys swallow real typing (Return/Esc especially),
+    Right-Option chords collide with push-to-talk, secure-input contexts
+    silently blind taps, and the active-tap disable/re-enable machinery is a
+    failure surface the panel doesn't have. `.nonactivatingPanel` delivers
+    clicks WITHOUT activating us, so the caret never leaves the target app —
+    the actual requirement. (This is about SELECTION only. Edit-before-insert
+    DOES take keyboard input, but in a SEPARATE activating `EditPanel` with a
+    first-responder `EditTextView` — no event tap — and hands focus back to the
+    target on exit. See the `ReviewOverlayController` note above.)
   - **Timeout default = TERSE, with the raw text staged on the clipboard.**
     (Originally RAW-by-default on "unreviewed = polish decline" reasoning;
     the user overruled it live 2026-07-07: the countdown is too short to
