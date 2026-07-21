@@ -29,6 +29,12 @@ final class MenuBar {
                                               action: nil, keyEquivalent: "")
     private let reviewMenuItem = NSMenuItem(title: "Review Before Paste",
                                             action: nil, keyEquivalent: "")
+    /// Polish Style ▸ submenu: which prompt template the review-overlay rewrite
+    /// uses (built-ins + the user's custom `.md` files). Rebuilt on every menu
+    /// open (via `templatesProvider`) so files added on disk show up.
+    private let templateMenu = NSMenu()
+    /// The currently checked template id, re-applied after each rebuild.
+    private var selectedTemplateID = "terse"
     /// Review Auto-Insert ▸ submenu: how long the overlay waits before picking
     /// the terse candidate itself ("never" = wait for a click).
     private let reviewTimingMenu = NSMenu()
@@ -69,6 +75,13 @@ final class MenuBar {
     /// Fired with "auto" / "never" / seconds when a Review Auto-Insert delay
     /// is picked.
     var onSelectReviewAutoInsert: ((String) -> Void)?
+    /// Fired with a `PromptTemplate.id` when the user picks a polish template.
+    var onSelectTemplate: ((String) -> Void)?
+    /// Fired when the user picks "Open Templates Folder…".
+    var onOpenTemplatesFolder: (() -> Void)?
+    /// Supplies the current template list (id + display name) for the submenu;
+    /// called on every menu open so custom files added on disk are picked up.
+    var templatesProvider: (() -> [(id: String, name: String)])?
 
     init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -115,6 +128,15 @@ final class MenuBar {
                                + "Intelligence model. Requires Apple Intelligence to be enabled in "
                                + "System Settings; inactive (no effect) otherwise."
         menu.addItem(polishMenuItem)
+
+        // Polish Style ▸ sits directly under Polish Transcript — both are the
+        // polish controls. (Starts with just the built-ins; AppDelegate fills in
+        // custom files via setTemplates and it rebuilds on every open.)
+        let templateItem = NSMenuItem(title: "Polish Style", action: nil, keyEquivalent: "")
+        templateItem.submenu = templateMenu
+        templateItem.toolTip = "Which prompt template rewrites the review-overlay text. "
+                             + "Edit or add your own in the templates folder."
+        menu.addItem(templateItem)
 
         reviewMenuItem.target = self
         reviewMenuItem.action = #selector(toggleReview)
@@ -302,6 +324,52 @@ final class MenuBar {
         onSelectReviewAutoInsert?(code)
     }
 
+    /// Rebuild the Polish Style ▸ submenu from the current template list, then
+    /// re-apply the checkmark. Called by `AppDelegate` at launch and on every
+    /// menu open (so a `.md` file added on disk appears without a restart).
+    func setTemplates(_ options: [(id: String, name: String)]) {
+        DispatchQueue.main.async { [self] in rebuildTemplateMenu(options) }
+    }
+
+    /// Synchronous rebuild — main-thread only. `showMenu` calls this directly
+    /// (it must finish before the menu is popped); `setTemplates` hops to main.
+    private func rebuildTemplateMenu(_ options: [(id: String, name: String)]) {
+        templateMenu.removeAllItems()
+        for option in options {
+            let item = NSMenuItem(title: option.name,
+                                  action: #selector(selectTemplate(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.id
+            item.state = (option.id == selectedTemplateID) ? .on : .off
+            templateMenu.addItem(item)
+        }
+        templateMenu.addItem(.separator())
+        let openItem = NSMenuItem(title: "Open Templates Folder…",
+                                  action: #selector(openTemplatesFolder),
+                                  keyEquivalent: "")
+        openItem.target = self
+        templateMenu.addItem(openItem)
+    }
+
+    /// Render the selected-template checkmark (and remember it for rebuilds).
+    func setTemplate(_ id: String) {
+        DispatchQueue.main.async { [self] in
+            selectedTemplateID = id
+            for item in templateMenu.items {
+                item.state = ((item.representedObject as? String) == id) ? .on : .off
+            }
+        }
+    }
+
+    @objc private func selectTemplate(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        setTemplate(id)
+        onSelectTemplate?(id)
+    }
+
+    @objc private func openTemplatesFolder() { onOpenTemplatesFolder?() }
+
     func update(_ state: State) {
         DispatchQueue.main.async { [self] in
             let symbol: String
@@ -414,6 +482,9 @@ final class MenuBar {
     /// the AppKit-sanctioned way to get correct positioning and button highlight;
     /// we clear it again immediately so a subsequent left-click still toggles.
     private func showMenu() {
+        // Re-read the templates folder so files added/removed on disk show up
+        // without a restart (cheap: a handful of small files).
+        if let options = templatesProvider?() { rebuildTemplateMenu(options) }
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil

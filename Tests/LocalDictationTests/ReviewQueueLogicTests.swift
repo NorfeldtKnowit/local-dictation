@@ -38,19 +38,33 @@ final class ReviewQueueLogicTests: XCTestCase {
         XCTAssertEqual(logic.showing?.polish, .rewrite("the terse"))
     }
 
-    func testPolishDeclineCompletesWithRawImmediately() {
-        // nil rewrite = nothing to choose between; don't make the user wait.
+    func testPolishDeclineShowsRawOnlyForReview() {
+        // nil rewrite = no distinct candidate, but "Review Before Paste" must
+        // STILL review: keep the overlay up (raw-only) and arm the deadman —
+        // never silently paste.
         var logic = ReviewQueueLogic()
         _ = logic.enqueue(id: 1, raw: "the raw")
         let commands = logic.polishFinished(id: 1, polished: nil)
-        XCTAssertEqual(commands, [.complete(id: 1, text: "the raw"), .hide])
+        XCTAssertEqual(commands, [.show(ReviewRequest(id: 1, raw: "the raw", polish: .none)),
+                                  .armDeadman(id: 1, delay: 5)])
     }
 
-    func testVerbatimEchoCompletesWithRawImmediately() {
+    func testVerbatimEchoShowsRawOnlyForReview() {
         var logic = ReviewQueueLogic()
         _ = logic.enqueue(id: 1, raw: "already terse")
         let commands = logic.polishFinished(id: 1, polished: "already terse")
-        XCTAssertEqual(commands, [.complete(id: 1, text: "already terse"), .hide])
+        XCTAssertEqual(commands, [.show(ReviewRequest(id: 1, raw: "already terse", polish: .none)),
+                                  .armDeadman(id: 1, delay: 5)])
+    }
+
+    func testRawOnlyDeadmanInsertsRawWithoutClipboardStaging() {
+        // The raw-only auto-insert IS the raw, so nothing is staged on the
+        // clipboard (unlike a rewrite auto-pick, which stages raw for recovery).
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: nil)
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false),
+                       [.complete(id: 1, text: "the raw"), .hide])
     }
 
     func testStalePolishFinishedIsIgnored() {
@@ -106,7 +120,7 @@ final class ReviewQueueLogicTests: XCTestCase {
         var logic = ReviewQueueLogic()
         _ = logic.enqueue(id: 1, raw: "raw one")
         _ = logic.enqueue(id: 2, raw: "raw two")
-        _ = logic.polishFinished(id: 1, polished: nil)   // finishes 1, shows 2
+        _ = logic.choose(id: 1, .dismiss)                // decide 1, advances to 2
         XCTAssertEqual(logic.choose(id: 1, .dismiss), [])
         XCTAssertEqual(shown(logic), 2)
     }
@@ -180,6 +194,203 @@ final class ReviewQueueLogicTests: XCTestCase {
                        [.complete(id: 1, text: "terse"), .hide])
     }
 
+    // MARK: - edit before insert: Copy (clipboard, no paste)
+
+    func testCopyEditedStagesClipboardAndSettlesWithoutPasting() {
+        // Copy stages the edited text on the clipboard and completes with "" so
+        // the sequencer advances but nothing pastes (the caret has moved). The
+        // clipboard command is FIRST so the empty complete can't clobber it.
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: "the terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.copyEdited(id: 1, text: "my hand edit"),
+                       [.copyToClipboard("my hand edit"),
+                        .complete(id: 1, text: ""), .hide])
+    }
+
+    func testCopyEmptyEditJustDismisses() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.copyEdited(id: 1, text: ""),
+                       [.complete(id: 1, text: ""), .hide])
+    }
+
+    func testCopyEditedForStaleIdIsIgnored() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw one")
+        _ = logic.enqueue(id: 2, raw: "raw two")
+        _ = logic.choose(id: 1, .dismiss)                // decide 1, advances to 2
+        XCTAssertEqual(logic.copyEdited(id: 1, text: "x"), [])
+        XCTAssertEqual(shown(logic), 2)
+    }
+
+    func testCopyEditedDrainsQueue() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw one")
+        _ = logic.enqueue(id: 2, raw: "raw two")
+        _ = logic.polishFinished(id: 1, polished: "terse one")
+        _ = logic.polishFinished(id: 2, polished: "terse two")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.copyEdited(id: 1, text: "edited one"), [
+            .copyToClipboard("edited one"),
+            .complete(id: 1, text: ""), .hide,
+            .show(ReviewRequest(id: 2, raw: "raw two", polish: .rewrite("terse two"))),
+            .armDeadman(id: 2, delay: 5),
+        ])
+    }
+
+    func testStaleDeadmanIgnoredAfterCopy() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw")
+        _ = logic.polishFinished(id: 1, polished: "terse")
+        _ = logic.beginEdit(id: 1)
+        _ = logic.copyEdited(id: 1, text: "edited")
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false), [])
+    }
+
+    // MARK: - edit before insert: Save (fold back into review)
+
+    func testSaveEditedRawGoesPendingAndReShowsThenRepolishArms() {
+        // Saving an edited RAW replaces raw, drops to pending (suspending the
+        // deadman) and re-shows so the caller can re-polish the NEW raw.
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "old raw", templateID: "terse")
+        _ = logic.polishFinished(id: 1, polished: "old terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.saveEditedRaw(id: 1, text: "new raw"),
+                       [.show(ReviewRequest(id: 1, raw: "new raw", templateID: "terse", polish: .pending))])
+        // Pending suspends the deadman until the re-polish settles.
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false), [])
+        // The re-polish of the new raw then updates + re-arms.
+        XCTAssertEqual(logic.repolishFinished(id: 1, polished: "new terse"),
+                       [.updatePolished(id: 1, text: "new terse"),
+                        .armDeadman(id: 1, delay: 5)])
+    }
+
+    func testSaveEditedRawDeclineFallsToRawOnlyOfNewRaw() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "old raw")
+        _ = logic.polishFinished(id: 1, polished: "old terse")
+        _ = logic.beginEdit(id: 1)
+        _ = logic.saveEditedRaw(id: 1, text: "new raw")
+        // A declined re-polish must NOT revert to the old rewrite (it was for the
+        // old raw) — it degrades to a raw-only review of the NEW raw.
+        XCTAssertEqual(logic.repolishFinished(id: 1, polished: nil),
+                       [.show(ReviewRequest(id: 1, raw: "new raw", polish: .none)),
+                        .armDeadman(id: 1, delay: 5)])
+    }
+
+    func testSaveEditedStyledUpdatesVerbatimAndReArms() {
+        // Saving an edited styled candidate sets it as the rewrite verbatim (no
+        // guardrails — the user authored it) and re-arms the countdown.
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: "the terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.saveEditedPolished(id: 1, text: "my styled edit 🎉"),
+                       [.show(ReviewRequest(id: 1, raw: "the raw", polish: .rewrite("my styled edit 🎉"))),
+                        .armDeadman(id: 1, delay: 5)])
+        // The edited rewrite is what a click / timeout now inserts.
+        XCTAssertEqual(logic.choose(id: 1, .polished),
+                       [.complete(id: 1, text: "my styled edit 🎉"), .hide])
+    }
+
+    func testSaveEditedStyledEmptyDegradesToRawOnly() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: "the terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.saveEditedPolished(id: 1, text: ""),
+                       [.show(ReviewRequest(id: 1, raw: "the raw", polish: .none)),
+                        .armDeadman(id: 1, delay: 5)])
+    }
+
+    func testSaveEditedForStaleIdIsIgnored() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw one")
+        _ = logic.enqueue(id: 2, raw: "raw two")
+        _ = logic.choose(id: 1, .dismiss)                // decide 1, advances to 2
+        XCTAssertEqual(logic.saveEditedRaw(id: 1, text: "x"), [])
+        XCTAssertEqual(logic.saveEditedPolished(id: 1, text: "y"), [])
+        XCTAssertEqual(shown(logic), 2)
+    }
+
+    func testBeginEditForWrongIdIsIgnored() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw")
+        XCTAssertEqual(logic.beginEdit(id: 99), [])
+    }
+
+    func testBeginEditSuspendsDeadman() {
+        // While editing, a fired deadman is ignored AND not re-armed — nothing
+        // auto-inserts the in-progress text.
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: "the terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false), [])
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: true), [])
+        XCTAssertEqual(shown(logic), 1)   // still showing, still editable
+    }
+
+    func testCancelEditReArmsCountdown() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw")
+        _ = logic.polishFinished(id: 1, polished: "the terse")
+        _ = logic.beginEdit(id: 1)
+        XCTAssertEqual(logic.cancelEdit(id: 1), [.armDeadman(id: 1, delay: 5)])
+        // Editing cleared: the deadman now decides normally again.
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false),
+                       [.copyToClipboard("the raw"),
+                        .complete(id: 1, text: "the terse"), .hide])
+    }
+
+    func testCancelEditWhenNotEditingIsIgnored() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw")
+        _ = logic.polishFinished(id: 1, polished: "terse")
+        XCTAssertEqual(logic.cancelEdit(id: 1), [])   // never entered edit
+    }
+
+    // MARK: - restyle (re-polish with a different template)
+
+    func testBeginRepolishSuspendsDeadmanThenRepolishReArms() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw text here")
+        _ = logic.polishFinished(id: 1, polished: "terse version")
+        // Restyle drops to pending, so a deadman that fires mid-repolish no-ops.
+        XCTAssertEqual(logic.beginRepolish(id: 1, badge: "BOOMER"), [])
+        XCTAssertEqual(logic.deadmanFired(id: 1, hovering: false), [])
+        // The new rewrite replaces the row and re-arms the countdown.
+        XCTAssertEqual(logic.repolishFinished(id: 1, polished: "Certainly, the raw text."),
+                       [.updatePolished(id: 1, text: "Certainly, the raw text."),
+                        .armDeadman(id: 1, delay: 5)])
+        // The new rewrite is what a click now inserts.
+        XCTAssertEqual(logic.choose(id: 1, .polished),
+                       [.complete(id: 1, text: "Certainly, the raw text."), .hide])
+    }
+
+    func testRepolishDeclineRevertsToPriorRewrite() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "the raw text here")
+        _ = logic.polishFinished(id: 1, polished: "terse version")
+        _ = logic.beginRepolish(id: 1, badge: "BOOMER")
+        // nil (guardrail reject / unavailable) must NOT collapse the overlay —
+        // it reverts to the pre-restyle rewrite and re-arms.
+        XCTAssertEqual(logic.repolishFinished(id: 1, polished: nil),
+                       [.updatePolished(id: 1, text: "terse version"),
+                        .armDeadman(id: 1, delay: 5)])
+    }
+
+    func testBeginRepolishForStaleIdIsIgnored() {
+        var logic = ReviewQueueLogic()
+        _ = logic.enqueue(id: 1, raw: "raw")
+        _ = logic.polishFinished(id: 1, polished: "terse")
+        XCTAssertEqual(logic.beginRepolish(id: 99, badge: "BOOMER"), [])
+    }
+
     // MARK: - FIFO
 
     func testQueuedRequestShowsAfterCurrentDecides() {
@@ -206,9 +417,11 @@ final class ReviewQueueLogicTests: XCTestCase {
         ])
     }
 
-    func testQueuedRequestWithDeclinedPolishNeverFlashesAnOverlay() {
-        // A queued request whose rewrite settled as "nothing to review" is
-        // completed directly on its turn — no single-candidate overlay.
+    func testQueuedRequestWithDeclinedPolishIsShownRawOnlyForReview() {
+        // A queued request whose rewrite settled as "nothing to review" is now
+        // SHOWN raw-only on its turn (not silently completed) — "Review Before
+        // Paste" reviews every utterance. It arms the deadman like any settled
+        // request; id 3 stays queued behind it.
         var logic = ReviewQueueLogic()
         _ = logic.enqueue(id: 1, raw: "raw one")
         _ = logic.enqueue(id: 2, raw: "raw two")
@@ -217,9 +430,10 @@ final class ReviewQueueLogicTests: XCTestCase {
         let commands = logic.choose(id: 1, .dismiss)
         XCTAssertEqual(commands, [
             .complete(id: 1, text: ""), .hide,
-            .complete(id: 2, text: "raw two"),          // drained, never shown
-            .show(ReviewRequest(id: 3, raw: "raw three")),
+            .show(ReviewRequest(id: 2, raw: "raw two", polish: .none)),
+            .armDeadman(id: 2, delay: 5),
         ])
+        XCTAssertEqual(shown(logic), 2)
     }
 
     func testBurstDrainsInOrderAndCompletesEveryID() {

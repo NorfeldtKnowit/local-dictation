@@ -141,9 +141,9 @@ actor DictationPipeline {
     ///     `--no-polish`). Only ever a quality upgrade: any decline — model
     ///     unavailable, guardrail reject, error, timeout — keeps the filtered
     ///     ASR text. No-op when the pipeline was built without a polisher.
-    ///   - polishStyle: how aggressively layer 4 may rewrite. `.standard` is
-    ///     the faithful cleanup; `.terse` (used by the review overlay) also
-    ///     condenses. Ignored when `polish` is false.
+    ///   - template: which polish prompt layer 4 uses. `.standard` is the
+    ///     faithful cleanup used inline; the review path passes the user's
+    ///     selected template via `polishText`. Ignored when `polish` is false.
     ///   - onColdLoad: fired (once, before the blocking warm-up) when the routed
     ///     engine isn't warm yet, so the GUI can show "Loading … model (first
     ///     use)…". Never fired for an already-warm engine.
@@ -154,7 +154,7 @@ actor DictationPipeline {
                  bypassGate: Bool = false,
                  bypassFilter: Bool = false,
                  polish: Bool = false,
-                 polishStyle: PolishStyle = .standard,
+                 template: PromptTemplate = .standard,
                  onColdLoad: (@Sendable (EngineKind) -> Void)? = nil) async throws -> Outcome {
         // Layers 1+2 (duration + VAD). Only `.pass` (trimmed) or `.vadUnavailable`
         // (raw, fail-open) proceed to ASR; `.tooShort` / `.silence` short-circuit
@@ -276,10 +276,10 @@ actor DictationPipeline {
         var text = cleaned
         var polished = false
         if polish, !cleaned.isEmpty, let polisher,
-           let refined = await polisher.polish(cleaned, style: polishStyle),
+           let refined = await polisher.polish(cleaned, template: template),
            refined != cleaned {   // verbatim echo == "already clean", not a rewrite
             // The pre-polish ASR text must stay recoverable from the log.
-            Log.info("polish (\(polishStyle.rawValue)) rewrote: \"\(cleaned.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
+            Log.info("polish (\(template.id)) rewrote: \"\(cleaned.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
             text = refined
             polished = true
         }
@@ -295,21 +295,21 @@ actor DictationPipeline {
     /// the ASR text" (unavailable, guardrail reject, timeout, verbatim echo).
     /// Routing (Apple FM vs MLX) lives in the injected `reviewPolisher`.
     func polishText(_ text: String,
-                    style: PolishStyle,
+                    template: PromptTemplate,
                     onPartial: (@Sendable (String) -> Void)? = nil) async -> String? {
         guard !text.isEmpty, let polisher = reviewPolisher ?? polisher else { return nil }
-        guard let refined = await polisher.polish(text, style: style, onPartial: onPartial) else {
+        guard let refined = await polisher.polish(text, template: template, onPartial: onPartial) else {
             // Backends already logged WHY (reject reason / failure / inactive).
             return nil
         }
         guard refined != text else {
             // Without this line a clean transcript's review pass is invisible
             // in the log and looks like review never ran.
-            Log.info("polish (\(style.rawValue)) echoed — transcript already clean", "polish")
+            Log.info("polish (\(template.id)) echoed — transcript already clean", "polish")
             return nil
         }
         // The pre-polish ASR text must stay recoverable from the log.
-        Log.info("polish (\(style.rawValue)) rewrote: \"\(text.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
+        Log.info("polish (\(template.id)) rewrote: \"\(text.prefix(160))\" -> \"\(refined.prefix(160))\"", "polish")
         return refined
     }
 

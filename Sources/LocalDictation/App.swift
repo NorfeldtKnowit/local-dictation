@@ -79,6 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Persisted language pin + Accuracy Mode; rendered by MenuBar, owned here.
     private let settings = LanguageSetting()
 
+    /// Polish prompt templates (built-ins + the user's `.md` files). Seeded once
+    /// at launch; read fresh for the menu and per-utterance for the review row.
+    private let templateStore = PromptTemplateStore()
+
     private var hotkey: HotkeyMonitor?
 
     /// Live "listening" waveform HUD, shown while the push-to-talk is held.
@@ -190,6 +194,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.reviewCoordinator.setTimeoutPolicy(.from(code: code))
             Log.info("review auto-insert: \(code)", "app")
         }
+        menuBar.templatesProvider = { [templateStore] in
+            templateStore.all().map { (id: $0.id, name: $0.name) }
+        }
+        menuBar.onSelectTemplate = { [weak self, mlxPolisher] id in
+            self?.settings.selectedTemplate = id
+            Log.info("polish template: \(id) (takes effect next utterance)", "app")
+            // A non-English review rewrite routes to the MLX model; page it in
+            // now (idempotent) so the first Danish utterance isn't the cold one.
+            Task.detached(priority: .background) { await mlxPolisher.warmUp() }
+        }
+        menuBar.onOpenTemplatesFolder = { [templateStore] in
+            Task { @MainActor in templateStore.openTemplatesFolder() }
+        }
+        // In-HUD style picker: the same template list, and a re-polish of the
+        // raw text when the user switches style inside the review overlay.
+        reviewCoordinator.setStylesProvider { [templateStore] in
+            templateStore.all().map { (id: $0.id, name: $0.name) }
+        }
+        reviewCoordinator.onRepolish = { [weak self] id, raw, templateID in
+            guard let self else { return }
+            let template = self.templateStore.template(forID: templateID)
+            Task { @MainActor [pipeline = self.pipeline, coordinator = self.reviewCoordinator] in
+                let polished = await pipeline.polishText(raw, template: template) { partial in
+                    DispatchQueue.main.async { coordinator.polishPartial(id: id, text: partial) }
+                }
+                coordinator.repolishFinished(id: id, polished: polished)
+            }
+        }
+        // Seed the folder + starter templates before the first menu render so
+        // the built-ins and starters are both visible immediately.
+        templateStore.ensureSeeded()
+        menuBar.setTemplates(templateStore.all().map { (id: $0.id, name: $0.name) })
+        menuBar.setTemplate(settings.selectedTemplate)
         menuBar.setLanguage(settings.language)
         menuBar.setAccuracyMode(settings.accuracyMode)
         menuBar.setPolishTranscript(settings.polishTranscript)
@@ -417,9 +454,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let accuracy = settings.accuracyMode || forceWhisper
         let polish = settings.polishTranscript
         // Review mode is only meaningful with polish on (one candidate is no
-        // choice), and it switches polish to the terse rewrite — that is the
-        // whole point of the second candidate.
+        // choice), and it switches polish to the selected template's rewrite —
+        // that is the whole point of the second candidate.
         let review = settings.reviewBeforePaste && polish
+        // Resolve the selected polish template now (folder read at utterance
+        // end, same snapshot discipline): a stale id falls back to .terse.
+        let template = templateStore.template(forID: settings.selectedTemplate)
 
         Task { @MainActor in
             do {
@@ -464,9 +504,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if review, !outcome.text.isEmpty {
                     let raw = outcome.text
                     let coordinator = reviewCoordinator
-                    coordinator.enqueue(id: id, raw: raw)
+                    coordinator.enqueue(id: id, raw: raw, badge: template.name.uppercased(), templateID: template.id)
                     Task { @MainActor [pipeline] in
-                        let polished = await pipeline.polishText(raw, style: .terse) { partial in
+                        let polished = await pipeline.polishText(raw, template: template) { partial in
                             DispatchQueue.main.async {
                                 coordinator.polishPartial(id: id, text: partial)
                             }

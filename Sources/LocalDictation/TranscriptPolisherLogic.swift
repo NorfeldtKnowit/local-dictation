@@ -1,14 +1,5 @@
 import Foundation
 
-/// How aggressively the polish stage may rewrite. `.standard` is the faithful
-/// cleanup (fillers, restarts, misrecognitions); `.terse` additionally
-/// condenses spoken rambling into the shortest text that keeps every point —
-/// the "processed" candidate the review overlay offers next to the raw ASR.
-enum PolishStyle: String, Sendable {
-    case standard
-    case terse
-}
-
 /// The pure half of the transcript-polish stage: the model instructions and
 /// the guardrails that decide whether a rewrite is safe to use. Kept free of
 /// FoundationModels so every rule here is unit-testable on any machine —
@@ -72,13 +63,6 @@ enum TranscriptPolisherLogic {
         - If the transcript is already clean and terse, output it unchanged.
         """
 
-    static func instructions(for style: PolishStyle) -> String {
-        switch style {
-        case .standard: return instructions
-        case .terse:    return terseInstructions
-        }
-    }
-
     /// Below this the transcript carries too little context for the model to
     /// fix anything a cheaper layer hasn't already — skip the call entirely.
     static let minCharacters = 16
@@ -100,6 +84,13 @@ enum TranscriptPolisherLogic {
     /// at zero: below ~0.15 of the raw length the rewrite has almost certainly
     /// dropped content, not just wording.
     static let terseMinLengthRatio = 0.15
+
+    /// Stylistic templates (genZ, boomer, custom) reshape wording, add emoji and
+    /// sign-offs, so their length band is the widest: they may condense to slang
+    /// or balloon with emoji/formatting, but a rewrite outside ~0.2-2.5x has
+    /// almost certainly dropped or invented content rather than restyled it.
+    static let stylisticMinLengthRatio = 0.2
+    static let stylisticMaxLengthRatio = 2.5
 
     /// Minimum share of the rewrite's words that must already occur in the
     /// raw transcript. A cleanup deletes freely but INTRODUCES only the odd
@@ -123,9 +114,15 @@ enum TranscriptPolisherLogic {
 
     /// Decide whether the model's rewrite of `raw` is safe to paste. Any
     /// rejection means the caller keeps `raw` — polish can only ever be a
-    /// quality upgrade, never a lost or corrupted utterance. `.terse` only
-    /// loosens the shrink floor; every other guardrail applies unchanged.
-    static func accept(raw: String, candidate: String, style: PolishStyle = .standard) -> Verdict {
+    /// quality upgrade, never a lost or corrupted utterance.
+    ///
+    /// The `profile` selects how strict the guards are. `.faithful` and `.terse`
+    /// differ only in the shrink floor (both keep every guard). `.stylistic`
+    /// widens the length band and DROPS the added-newline and word-overlap
+    /// guards — a slang/emoji/formal restyle legitimately introduces new words
+    /// and lines — while keeping the hard safety checks (non-empty, bounded
+    /// length, and the never-translate language guard).
+    static func accept(raw: String, candidate: String, profile: GuardrailProfile = .faithful) -> Verdict {
         var polished = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         // Un-wrap a quote pair (ASCII or typographic) the model added around
         // the whole answer — but never quotes that belong to the text: only
@@ -141,28 +138,40 @@ enum TranscriptPolisherLogic {
             }
         }
         guard !polished.isEmpty else { return .rejected(reason: "empty rewrite") }
-        if polished.contains("\n") && !raw.contains("\n") {
+        // Added newlines read as commentary ("Here is the cleaned transcript:\n…")
+        // for cleanup styles, but are legitimate for a stylistic restyle (a boomer
+        // sign-off, a list), so this guard is skipped for `.stylistic`.
+        if profile != .stylistic, polished.contains("\n") && !raw.contains("\n") {
             return .rejected(reason: "added line breaks (reads as commentary)")
         }
         let ratio = Double(polished.count) / Double(raw.count)
-        let shrinkFloor = (style == .terse) ? terseMinLengthRatio : minLengthRatio
+        let (shrinkFloor, growthCeiling): (Double, Double)
+        switch profile {
+        case .faithful:  (shrinkFloor, growthCeiling) = (minLengthRatio, maxLengthRatio)
+        case .terse:     (shrinkFloor, growthCeiling) = (terseMinLengthRatio, maxLengthRatio)
+        case .stylistic: (shrinkFloor, growthCeiling) = (stylisticMinLengthRatio, stylisticMaxLengthRatio)
+        }
         if ratio < shrinkFloor {
             return .rejected(reason: "shrank to \(String(format: "%.2f", ratio))x (< \(shrinkFloor))")
         }
-        if ratio > maxLengthRatio {
-            return .rejected(reason: "grew to \(String(format: "%.2f", ratio))x (> \(maxLengthRatio))")
+        if ratio > growthCeiling {
+            return .rejected(reason: "grew to \(String(format: "%.2f", ratio))x (> \(growthCeiling))")
         }
         // Commentary/invention guard: most of the rewrite's words must come
         // from the raw transcript (deleting is free; introducing is bounded
         // to the occasional misrecognition fix). Catches same-line preambles
         // the newline check can't see, and same-language invented content.
-        let rawWords = Set(words(raw))
-        let candidateWords = words(polished)
-        if candidateWords.count >= 5 {
-            let known = candidateWords.filter(rawWords.contains).count
-            let overlap = Double(known) / Double(candidateWords.count)
-            if overlap < minWordOverlap {
-                return .rejected(reason: "only \(String(format: "%.0f", overlap * 100))% of rewrite words occur in the transcript (reads as commentary/invention)")
+        // Skipped for `.stylistic`, which introduces new words BY DESIGN (slang,
+        // emoji, formal phrasing) — the language guard below still applies.
+        if profile != .stylistic {
+            let rawWords = Set(words(raw))
+            let candidateWords = words(polished)
+            if candidateWords.count >= 5 {
+                let known = candidateWords.filter(rawWords.contains).count
+                let overlap = Double(known) / Double(candidateWords.count)
+                if overlap < minWordOverlap {
+                    return .rejected(reason: "only \(String(format: "%.0f", overlap * 100))% of rewrite words occur in the transcript (reads as commentary/invention)")
+                }
             }
         }
         // Translation guard: no language of the raw text may VANISH from the

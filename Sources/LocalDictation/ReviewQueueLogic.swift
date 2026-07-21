@@ -13,7 +13,16 @@ struct ReviewRequest: Equatable, Sendable {
     }
 
     let id: UInt64
-    let raw: String
+    /// The filtered ASR text. Mutable because a Save of an edited RAW candidate
+    /// replaces it with the user's text and re-polishes from there.
+    var raw: String
+    /// Uppercased display name of the polish template driving the rewrite row
+    /// (e.g. "TERSE", "GENZ") — the second candidate's badge and countdown label.
+    var badge: String = "TERSE"
+    /// Template id that produced (or will produce) the rewrite row — carried so a
+    /// Save of an edited RAW can re-polish with the same style. Display-only to
+    /// the logic (like `badge`); only the coordinator interprets it.
+    var templateID: String = ""
     var polish: PolishState = .pending
 }
 
@@ -99,9 +108,21 @@ struct ReviewQueueLogic {
     private(set) var showing: ReviewRequest?
     private var queue: [ReviewRequest] = []
     private var rearmsUsed = 0
+    /// True while the shown request is being hand-edited in the overlay. The
+    /// countdown is fully suspended: a deadman that fires mid-edit is ignored
+    /// and NOT re-armed, so nothing auto-inserts while the user is typing.
+    /// Cleared on cancel (re-arms) or on any settle. An abandoned edit leaves
+    /// the utterance pending and later ones queued behind it — the same,
+    /// already-sanctioned tradeoff as the `.never` auto-insert policy.
+    private var isEditing = false
+    /// The rewrite that was on screen when a restyle (re-polish) began, kept so
+    /// a declined/echoed re-polish reverts to it instead of collapsing the
+    /// overlay. Cleared once the re-polish settles or the request finishes.
+    private var priorRewrite: String?
 
-    mutating func enqueue(id: UInt64, raw: String) -> [Command] {
-        let request = ReviewRequest(id: id, raw: raw)
+    mutating func enqueue(id: UInt64, raw: String, badge: String = "TERSE",
+                          templateID: String = "") -> [Command] {
+        let request = ReviewRequest(id: id, raw: raw, badge: badge, templateID: templateID)
         guard showing == nil else {
             queue.append(request)
             return []
@@ -112,14 +133,19 @@ struct ReviewQueueLogic {
     }
 
     /// The polish stage settled for utterance `id` (always happens — the
-    /// backends have their own timeouts). nil / verbatim echo means there is
-    /// nothing to choose between: the shown request completes with raw
-    /// immediately. A real rewrite updates the display and arms the deadman.
-    /// Applies equally to a request still waiting in the queue.
+    /// backends have their own timeouts). A real rewrite updates the display
+    /// and arms the deadman. nil / verbatim echo means there is no distinct
+    /// rewrite — but "Review Before Paste" must STILL let the user review, so
+    /// the overlay stays up showing the RAW alone (editable/dismissable, with
+    /// the deadman auto-inserting raw); it never silently pastes. Applies
+    /// equally to a request still waiting in the queue.
     mutating func polishFinished(id: UInt64, polished: String?) -> [Command] {
         if var current = showing, current.id == id {
             guard let polished, polished != current.raw else {
-                return finish(current, text: current.raw)
+                current.polish = .none
+                showing = current
+                return [.show(current),
+                        .armDeadman(id: id, delay: deadmanDelay(for: current))]
             }
             current.polish = .rewrite(polished)
             showing = current
@@ -156,19 +182,142 @@ struct ReviewQueueLogic {
         return finish(current, text: text)
     }
 
+    /// The user chose "Copy" in the inline editor: stage the edited text on the
+    /// clipboard and settle the utterance WITHOUT pasting. Editing almost always
+    /// moves the caret in the target app, so a synthetic paste would land in the
+    /// wrong place — copy, then let the user paste where they now are. Completing
+    /// with "" keeps the sequencer's every-ID-settles contract; because an empty
+    /// complete never pastes (so never snapshots/restores the pasteboard), the
+    /// staged clipboard text survives. `copyToClipboard` is ordered FIRST for the
+    /// same reason. An empty edit is just a dismiss. A no-op for a stale/queued id.
+    mutating func copyEdited(id: UInt64, text: String) -> [Command] {
+        guard let current = showing, current.id == id else { return [] }
+        guard !text.isEmpty else { return finish(current, text: "") }
+        return [.copyToClipboard(text)] + finish(current, text: "")
+    }
+
+    /// The user opened the inline editor for the shown request. Suspends the
+    /// countdown (see `isEditing`); a no-op for a stale/queued id.
+    mutating func beginEdit(id: UInt64) -> [Command] {
+        guard let current = showing, current.id == id else { return [] }
+        isEditing = true
+        return []
+    }
+
+    /// The user backed out of the editor without committing. Resumes the
+    /// normal countdown from scratch; a no-op for a stale/queued id or when
+    /// not editing.
+    mutating func cancelEdit(id: UInt64) -> [Command] {
+        guard isEditing, let current = showing, current.id == id else { return [] }
+        isEditing = false
+        return [.armDeadman(id: id, delay: deadmanDelay(for: current))]
+    }
+
+    /// The user chose "Save" while editing the RAW candidate. The edited text
+    /// becomes the new raw and the row drops back to `.pending` (which suspends
+    /// the deadman, exactly like a restyle) so the caller can re-polish the NEW
+    /// raw with the current style; the streamed rewrite flows back through
+    /// `repolishFinished`. `priorRewrite` is cleared: a declined re-polish must
+    /// fall to a raw-only review of the NEW raw, never revert to a rewrite of the
+    /// old one. A no-op for a stale/queued id.
+    mutating func saveEditedRaw(id: UInt64, text: String) -> [Command] {
+        guard var current = showing, current.id == id else { return [] }
+        isEditing = false
+        priorRewrite = nil
+        current.raw = text
+        current.polish = .pending
+        showing = current
+        return [.show(current)]
+    }
+
+    /// The user chose "Save" while editing the styled candidate. The edited text
+    /// becomes the rewrite VERBATIM — the user authored it, so the polish
+    /// guardrails don't apply — and the HUD re-renders (raw↔terse diff) and
+    /// re-arms the countdown. An emptied edit degrades to a raw-only review
+    /// rather than showing an empty rewrite row. A no-op for a stale/queued id.
+    mutating func saveEditedPolished(id: UInt64, text: String) -> [Command] {
+        guard var current = showing, current.id == id else { return [] }
+        isEditing = false
+        priorRewrite = nil
+        current.polish = text.isEmpty ? .none : .rewrite(text)
+        showing = current
+        return [.show(current), .armDeadman(id: id, delay: deadmanDelay(for: current))]
+    }
+
+    /// The user picked a different polish style for the shown request. Stashes
+    /// the current rewrite (so a declined re-polish can revert) and drops the
+    /// row back to `.pending` with the new badge — which also suspends the
+    /// deadman, since `deadmanFired` only fires on a settled `.rewrite`. The
+    /// caller (AppDelegate) then re-runs polish on the raw and reports back via
+    /// `repolishFinished`. A no-op for a stale/queued id.
+    mutating func beginRepolish(id: UInt64, badge: String, templateID: String = "") -> [Command] {
+        guard var current = showing, current.id == id else { return [] }
+        if case .rewrite(let rewrite) = current.polish { priorRewrite = rewrite }
+        current.badge = badge
+        current.templateID = templateID
+        current.polish = .pending
+        showing = current
+        return []
+    }
+
+    /// A restyle's re-polish settled. A usable rewrite replaces the row and
+    /// re-arms the countdown; a decline/echo reverts to the pre-restyle rewrite
+    /// (never collapses the overlay the user is actively working). A no-op for a
+    /// stale/queued id.
+    mutating func repolishFinished(id: UInt64, polished: String?) -> [Command] {
+        guard var current = showing, current.id == id else { return [] }
+        if let polished, polished != current.raw {
+            current.polish = .rewrite(polished)
+            showing = current
+            priorRewrite = nil
+            return [.updatePolished(id: id, text: polished),
+                    .armDeadman(id: id, delay: deadmanDelay(for: current))]
+        }
+        // Declined/echoed re-polish: revert to the pre-restyle rewrite if there
+        // was one, else fall back to raw-only review (same as a first-polish
+        // decline) — never collapse the overlay the user is working.
+        if let prior = priorRewrite {
+            current.polish = .rewrite(prior)
+            showing = current
+            priorRewrite = nil
+            return [.updatePolished(id: id, text: prior),
+                    .armDeadman(id: id, delay: deadmanDelay(for: current))]
+        }
+        current.polish = .none
+        showing = current
+        return [.show(current),
+                .armDeadman(id: id, delay: deadmanDelay(for: current))]
+    }
+
     /// The scheduled deadman fired. Stale firings are identified by ID and
     /// ignored; it is only ever armed once a rewrite exists. A fire while
     /// hovering re-arms instead of deciding — but only `maxHoverRearms`
     /// times. The unattended decision is the REWRITE, with the raw candidate
     /// staged on the clipboard for recovery.
     mutating func deadmanFired(id: UInt64, hovering: Bool) -> [Command] {
-        guard let current = showing, current.id == id,
-              case .rewrite(let rewrite) = current.polish else { return [] }
+        guard let current = showing, current.id == id else { return [] }
+        // What the unattended timeout inserts: the rewrite if there is one, else
+        // the raw (a raw-only review of a declined polish). Still pending =
+        // nothing settled yet, so the fire is a no-op.
+        let autoText: String
+        switch current.polish {
+        case .rewrite(let rewrite): autoText = rewrite
+        case .none:                 autoText = current.raw
+        case .pending:              return []
+        }
+        // Editing fully suspends the countdown: ignore the fire and do NOT
+        // re-arm, so the user's in-progress text is never auto-inserted.
+        if isEditing { return [] }
         if hovering && rearmsUsed < Self.maxHoverRearms {
             rearmsUsed += 1
             return [.armDeadman(id: id, delay: Self.hoverGrace)]
         }
-        return [.copyToClipboard(current.raw)] + finish(current, text: rewrite)
+        // A rewrite auto-pick stages raw on the clipboard for recovery; a
+        // raw-only pick already IS the raw, so there is nothing to stage.
+        if case .none = current.polish {
+            return finish(current, text: autoText)
+        }
+        return [.copyToClipboard(current.raw)] + finish(current, text: autoText)
     }
 
     private func deadmanDelay(for request: ReviewRequest) -> TimeInterval? {
@@ -181,22 +330,25 @@ struct ReviewQueueLogic {
 
     private mutating func finish(_ current: ReviewRequest, text: String) -> [Command] {
         showing = nil
+        isEditing = false
+        priorRewrite = nil
         var commands: [Command] = [.complete(id: current.id, text: text), .hide]
-        // Drain queued requests whose polish already settled with nothing to
-        // review — showing them would flash a single-candidate overlay.
-        while !queue.isEmpty {
+        // Show the next queued request. A settled one (rewrite OR declined
+        // raw-only) is shown and armed; a still-pending one is shown and arms
+        // when its polish settles. "Review Before Paste" reviews every
+        // utterance — including declined ones (raw-only), which is why a `.none`
+        // is no longer drained silently.
+        if !queue.isEmpty {
             let next = queue.removeFirst()
-            if next.polish == .none {
-                commands.append(.complete(id: next.id, text: next.raw))
-                continue
-            }
             showing = next
             rearmsUsed = 0
             commands.append(.show(next))
-            if case .rewrite = next.polish {
+            switch next.polish {
+            case .rewrite, .none:
                 commands.append(.armDeadman(id: next.id, delay: deadmanDelay(for: next)))
+            case .pending:
+                break
             }
-            break
         }
         return commands
     }

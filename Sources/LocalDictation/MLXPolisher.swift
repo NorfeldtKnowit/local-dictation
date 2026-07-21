@@ -9,11 +9,19 @@ import MLXLMCommon
 enum PolishBackendRouter {
     enum Backend { case apple, mlx }
 
-    static func backend(for text: String) -> Backend {
-        // nil (undetectable, e.g. very short text) folds to English: on this
-        // English-system machine ambiguous fragments are most likely English,
-        // and the FM call is the cheap one to waste.
-        (TextLanguageID.dominantLanguage(of: text) ?? "en") == "en" ? .apple : .mlx
+    static func backend(for text: String, profile: GuardrailProfile) -> Backend {
+        // Stylistic restyles (genZ, corporate, marketing, custom) need a model
+        // that will actually COMMIT to a bold voice. Apple's FM is tuned for
+        // conservative cleanup: it neutralises slang/jargon and frequently
+        // echoes the input unchanged, so a restyle "does nothing". Route every
+        // stylistic template to the local Qwen model regardless of language —
+        // it follows style instructions far more faithfully.
+        if profile == .stylistic { return .mlx }
+        // Faithful/terse cleanup: FM is great and fast for English; everything
+        // else (notably Danish) goes to Qwen. nil (undetectable, e.g. very
+        // short text) folds to English — ambiguous fragments are most likely
+        // English on this system and the FM call is the cheap one to waste.
+        return (TextLanguageID.dominantLanguage(of: text) ?? "en") == "en" ? .apple : .mlx
     }
 }
 
@@ -30,11 +38,11 @@ struct RoutedPolisher: TranscriptPolishing {
     /// download + multi-GB load) is kicked explicitly by `AppDelegate`.
     func warmUp() async { await apple.warmUp() }
 
-    func polish(_ text: String, style: PolishStyle,
+    func polish(_ text: String, template: PromptTemplate,
                 onPartial: (@Sendable (String) -> Void)?) async -> String? {
-        switch PolishBackendRouter.backend(for: text) {
-        case .apple: return await apple.polish(text, style: style, onPartial: onPartial)
-        case .mlx:   return await mlx.polish(text, style: style, onPartial: onPartial)
+        switch PolishBackendRouter.backend(for: text, profile: template.profile) {
+        case .apple: return await apple.polish(text, template: template, onPartial: onPartial)
+        case .mlx:   return await mlx.polish(text, template: template, onPartial: onPartial)
         }
     }
 }
@@ -71,18 +79,18 @@ actor MLXPolisher: TranscriptPolishing {
         _ = try? await container()
     }
 
-    func polish(_ text: String, style: PolishStyle,
+    func polish(_ text: String, template: PromptTemplate,
                 onPartial: (@Sendable (String) -> Void)?) async -> String? {
         guard TranscriptPolisherLogic.worthPolishing(text) else { return nil }
         do {
             let candidate = try await AsyncTimeout.run(seconds: Self.timeoutSeconds) {
                 let container = try await self.container(onPartial: onPartial)
                 return try await Self.generate(container: container,
-                                               instructions: TranscriptPolisherLogic.instructions(for: style),
+                                               instructions: template.instructions,
                                                prompt: text,
                                                onPartial: onPartial)
             }
-            switch TranscriptPolisherLogic.accept(raw: text, candidate: candidate, style: style) {
+            switch TranscriptPolisherLogic.accept(raw: text, candidate: candidate, profile: template.profile) {
             case .accepted(let polished):
                 return polished
             case .rejected(let reason):

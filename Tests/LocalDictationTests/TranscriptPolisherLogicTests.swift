@@ -117,25 +117,79 @@ final class TranscriptPolisherLogicTests: XCTestCase {
             return XCTFail("standard style must reject a sub-0.3x shrink")
         }
         guard case .accepted(condensed) = TranscriptPolisherLogic.accept(raw: raw, candidate: condensed,
-                                                                         style: .terse) else {
-            return XCTFail("terse style must accept a condensed rewrite above its floor")
+                                                                         profile: .terse) else {
+            return XCTFail("terse profile must accept a condensed rewrite above its floor")
         }
     }
 
     func testTerseStillRejectsExtremeShrink() {
         let raw = "I think that we should, I think that we should probably really just go with option two here, "
                 + "that is, with option two out of the two options that we talked about before."
-        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: "Two.", style: .terse) else {
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: "Two.", profile: .terse) else {
             return XCTFail("terse must still reject a shrink below its own floor")
         }
     }
 
-    func testStyleInstructionsDiffer() {
-        XCTAssertEqual(TranscriptPolisherLogic.instructions(for: .standard),
-                       TranscriptPolisherLogic.instructions)
-        XCTAssertNotEqual(TranscriptPolisherLogic.instructions(for: .terse),
-                          TranscriptPolisherLogic.instructions(for: .standard))
-        XCTAssertFalse(TranscriptPolisherLogic.terseInstructions.isEmpty)
+    // MARK: stylistic profile (loosened guardrails)
+
+    func testStylisticAcceptsLowOverlapRestyleFaithfulRejects() {
+        // A genZ-style rewrite: same points, mostly NEW words + an emoji. The
+        // faithful/terse word-overlap guard must reject it; stylistic accepts.
+        let raw = "I really think we should probably just go with the second option here, honestly."
+        let restyled = "ngl we should just lock in option two fr fr 💯"
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: restyled) else {
+            return XCTFail("faithful profile must reject a low-overlap restyle")
+        }
+        guard case .accepted(restyled) = TranscriptPolisherLogic.accept(raw: raw, candidate: restyled,
+                                                                        profile: .stylistic) else {
+            return XCTFail("stylistic profile must accept a low-overlap restyle")
+        }
+    }
+
+    func testStylisticAllowsAddedLineBreaks() {
+        // A boomer-style sign-off adds a line the faithful guard would reject.
+        let raw = "please send me the report by friday so i can review it over the weekend thanks"
+        let restyled = "Please send me the report by Friday so I can review it over the weekend.\n\nKind regards."
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: restyled) else {
+            return XCTFail("faithful profile must reject added line breaks")
+        }
+        guard case .accepted = TranscriptPolisherLogic.accept(raw: raw, candidate: restyled,
+                                                              profile: .stylistic) else {
+            return XCTFail("stylistic profile must allow added line breaks")
+        }
+    }
+
+    func testStylisticStillRejectsEmptyAndTranslation() {
+        // The hard safety guards survive the loosening.
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: disfluentRaw, candidate: "",
+                                                              profile: .stylistic) else {
+            return XCTFail("stylistic must still reject an empty rewrite")
+        }
+        let danish = "Komplet omskrivning af forgreningen, så vi kan starte forfra med det samme."
+        let english = "Complete rewrite of the branch, so we can start over right away."
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: danish, candidate: english,
+                                                              profile: .stylistic) else {
+            return XCTFail("stylistic must still reject a translated rewrite (never-translate)")
+        }
+    }
+
+    func testStylisticStillRejectsRunawayGrowth() {
+        // Even loosened, growth past the stylistic ceiling is invention.
+        let raw = "send the report on friday please"
+        let huge = String(repeating: "and here is a whole invented extra clause the speaker never said, ",
+                          count: 6)
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: raw, candidate: huge,
+                                                              profile: .stylistic) else {
+            return XCTFail("stylistic must still reject runaway growth")
+        }
+    }
+
+    func testBuiltInTemplateInstructions() {
+        XCTAssertEqual(PromptTemplate.standard.instructions, TranscriptPolisherLogic.instructions)
+        XCTAssertEqual(PromptTemplate.terse.instructions, TranscriptPolisherLogic.terseInstructions)
+        XCTAssertNotEqual(PromptTemplate.terse.instructions, PromptTemplate.standard.instructions)
+        XCTAssertEqual(PromptTemplate.standard.profile, .faithful)
+        XCTAssertEqual(PromptTemplate.terse.profile, .terse)
     }
 
     func testTranslationRejected() {

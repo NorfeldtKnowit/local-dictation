@@ -26,12 +26,19 @@ final class LanguageSettingTests: XCTestCase {
         XCTAssertFalse(setting.copyInsteadOfPaste)
         XCTAssertFalse(setting.reviewBeforePaste)
         XCTAssertEqual(setting.reviewAutoInsert, "auto")
+        XCTAssertEqual(setting.selectedTemplate, "terse")
     }
 
     func testReviewAutoInsertPersists() {
         let setting = LanguageSetting(defaults: defaults)
         setting.reviewAutoInsert = "never"
         XCTAssertEqual(LanguageSetting(defaults: defaults).reviewAutoInsert, "never")
+    }
+
+    func testSelectedTemplatePersists() {
+        let setting = LanguageSetting(defaults: defaults)
+        setting.selectedTemplate = "genz"
+        XCTAssertEqual(LanguageSetting(defaults: defaults).selectedTemplate, "genz")
     }
 
     func testPinPersists() {

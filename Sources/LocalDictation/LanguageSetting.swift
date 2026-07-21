@@ -20,6 +20,7 @@ struct LanguageSetting {
     static let copyKey = "copyInsteadOfPaste"  // Bool; default false
     static let reviewKey = "reviewBeforePaste" // Bool; default false
     static let reviewAutoInsertKey = "reviewAutoInsert" // "auto" | "never" | seconds; default "auto"
+    static let selectedTemplateKey = "selectedTemplate" // PromptTemplate id; default "terse"
 
     private let defaults: UserDefaults
 
@@ -61,5 +62,14 @@ struct LanguageSetting {
     var reviewAutoInsert: String {
         get { defaults.string(forKey: Self.reviewAutoInsertKey) ?? "auto" }
         nonmutating set { defaults.set(newValue, forKey: Self.reviewAutoInsertKey) }
+    }
+
+    /// The polish prompt template used for the review-overlay rewrite: a
+    /// `PromptTemplate.id` ("terse" built-in by default, or a custom file's
+    /// lowercased name). Resolved to a `PromptTemplate` via `PromptTemplateStore`
+    /// at utterance end; a stale id (file deleted) falls back to `.terse`.
+    var selectedTemplate: String {
+        get { defaults.string(forKey: Self.selectedTemplateKey) ?? "terse" }
+        nonmutating set { defaults.set(newValue, forKey: Self.selectedTemplateKey) }
     }
 }

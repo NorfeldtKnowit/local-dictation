@@ -60,17 +60,17 @@ private actor FakePolisher: TranscriptPolishing {
     private let result: String?
     private(set) var polishCount = 0
     private(set) var lastInput: String?
-    private(set) var lastStyle: PolishStyle?
+    private(set) var lastTemplate: PromptTemplate?
 
     init(result: String?) { self.result = result }
 
     func warmUp() async {}
 
-    func polish(_ text: String, style: PolishStyle,
+    func polish(_ text: String, template: PromptTemplate,
                 onPartial: (@Sendable (String) -> Void)?) async -> String? {
         polishCount += 1
         lastInput = text
-        lastStyle = style
+        lastTemplate = template
         // Streaming fake: one partial (half the result) before the final, so
         // the review-path test can assert partials flow through.
         if let onPartial, let result {
@@ -697,7 +697,7 @@ final class DictationPipelineTests: XCTestCase {
         XCTAssertEqual(out.text, "I want to refactor the parser module.")
     }
 
-    func testPolishStyleDefaultsToStandardAndPlumbsTerse() async throws {
+    func testPolishTemplateDefaultsToStandardAndPlumbsSelection() async throws {
         let parakeet = FakeEngine(kind: .parakeet, output: "some plain dictated text here", startWarm: true, confidence: 0.95)
         let whisper = FakeEngine(kind: .whisper, output: "unused", startWarm: true)
         let gate = FakeGate(outcome: .init(decision: .pass, audio: passingAudio))
@@ -706,13 +706,13 @@ final class DictationPipelineTests: XCTestCase {
 
         _ = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
                                        polish: true)
-        var style = await polisher.lastStyle
-        XCTAssertEqual(style, .standard)
+        var template = await polisher.lastTemplate
+        XCTAssertEqual(template, .standard)
 
         _ = try await pipeline.process(samples: passingAudio, language: "en", accuracyMode: false,
-                                       polish: true, polishStyle: .terse)
-        style = await polisher.lastStyle
-        XCTAssertEqual(style, .terse)
+                                       polish: true, template: .terse)
+        template = await polisher.lastTemplate
+        XCTAssertEqual(template, .terse)
     }
 
     func testPolishOffByDefault() async throws {
