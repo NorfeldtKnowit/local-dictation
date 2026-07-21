@@ -28,9 +28,11 @@ final class PromptTemplateStoreTests: XCTestCase {
     func testBuiltInsAlwaysPresent() {
         // Empty (non-existent) folder: only the compiled built-ins.
         let all = store().all()
-        XCTAssertEqual(all.map(\.id), ["standard", "terse"])
+        XCTAssertEqual(all.map(\.id), ["standard", "terse", "translate-english", "translate-swedish"])
         XCTAssertEqual(all.first(where: { $0.id == "standard" })?.profile, .faithful)
         XCTAssertEqual(all.first(where: { $0.id == "terse" })?.profile, .terse)
+        XCTAssertEqual(all.first(where: { $0.id == "translate-english" })?.profile, .translation)
+        XCTAssertEqual(all.first(where: { $0.id == "translate-swedish" })?.profile, .translation)
     }
 
     func testCustomFileLoadsAsStylistic() {
@@ -46,8 +48,9 @@ final class PromptTemplateStoreTests: XCTestCase {
     func testCustomFileOverridesBuiltIn() {
         write("terse.md", "My own terser prompt.")
         let all = store().all()
-        // Still exactly two ids (no duplicate), but terse now carries the file.
-        XCTAssertEqual(all.map(\.id).sorted(), ["standard", "terse"])
+        // Still exactly the built-in ids (no duplicate), but terse now carries the file.
+        XCTAssertEqual(all.map(\.id).sorted(),
+                       ["standard", "terse", "translate-english", "translate-swedish"])
         let terse = all.first { $0.id == "terse" }
         XCTAssertEqual(terse?.instructions, "My own terser prompt.")
         XCTAssertEqual(terse?.profile, .stylistic)         // file override => stylistic
@@ -74,25 +77,48 @@ final class PromptTemplateStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
         s.ensureSeeded()
         let ids = Set(s.all().map(\.id))
-        XCTAssertTrue(ids.isSuperset(of: ["genz", "millennial", "boomer", "corporate", "marketing"]))
+        XCTAssertTrue(ids.isSuperset(of: ["millennial", "boomer", "corporate", "marketing"]))
+        XCTAssertNil(s.all().first { $0.id == "genz" })   // GenZ is retired, never seeded
 
         // Seed-once (by name marker): deleting a starter and re-seeding does not
         // resurrect it.
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent("GenZ.md"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("Boomer.md"))
         s.ensureSeeded()
-        XCTAssertNil(s.all().first { $0.id == "genz" })
+        XCTAssertNil(s.all().first { $0.id == "boomer" })
     }
 
     func testEnsureSeededFillsMissingStartersInExistingFolder() {
         // Simulates an existing install (folder present, one starter, no marker):
         // ensureSeeded must add the rest without a folder-absence gate.
-        write("GenZ.md", "my edited genz")
+        write("Boomer.md", "my edited boomer")
         let s = store()
         s.ensureSeeded()
         let ids = Set(s.all().map(\.id))
         XCTAssertTrue(ids.isSuperset(of: ["corporate", "marketing", "millennial", "boomer"]))
         // A pre-existing same-named file is never clobbered.
-        XCTAssertEqual(s.all().first { $0.id == "genz" }?.instructions, "my edited genz")
+        XCTAssertEqual(s.all().first { $0.id == "boomer" }?.instructions, "my edited boomer")
+    }
+
+    func testEnsureSeededRetiresPreviouslySeededGenZ() {
+        // Simulates an install that HAD GenZ seeded: file present + name in the
+        // marker. ensureSeeded must delete the leftover file (one-shot) and not
+        // show it as a template.
+        write("GenZ.md", "the old seeded genz body")
+        write(".seeded", "Boomer\nCorporate\nGenZ\nMarketing\nMillennial")
+        let s = store()
+        s.ensureSeeded()
+        XCTAssertNil(s.all().first { $0.id == "genz" })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("GenZ.md").path))
+    }
+
+    func testEnsureSeededDoesNotDeleteUserAuthoredGenZ() {
+        // A user's OWN GenZ.md (no marker entry — we never seeded it) must survive
+        // retirement: retirement is keyed on the name being in the marker.
+        write("GenZ.md", "my own genz i wrote after retirement")
+        let s = store()
+        s.ensureSeeded()
+        XCTAssertEqual(s.all().first { $0.id == "genz" }?.instructions,
+                       "my own genz i wrote after retirement")
     }
 
     func testSeedMarkerNotShownAsTemplate() {

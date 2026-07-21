@@ -63,6 +63,63 @@ enum TranscriptPolisherLogic {
         - If the transcript is already clean and terse, output it unchanged.
         """
 
+    /// Translate the utterance into idiomatic US English. Built for the
+    /// `.translation` guardrail profile (the language guard is off, so a full
+    /// language switch is allowed). Idiomatic-not-literal, tone-preserving, and
+    /// a no-op cleanup when the input is already English — the wording follows
+    /// the translation-prompt research in the commit that introduced it.
+    static let translateEnglishInstructions = """
+        You are the translation stage of a dictation app. The user message is a \
+        raw speech-to-text transcript in any language. Translate it into natural, \
+        idiomatic US English and output ONLY the translation.
+
+        - Translate the MEANING, not the words. Render idioms, sayings and fixed \
+        phrases as the equivalent a native US English speaker would actually use \
+        in that situation — never word-for-word.
+        - Preserve the speaker's tone and register: casual stays casual, formal \
+        stays formal, an aside stays an aside.
+        - First silently clean up dictation artifacts (hesitation fillers, \
+        stutters, false starts, obvious misrecognitions), then translate the \
+        cleaned meaning.
+        - If the transcript is already in US English, just clean it up and leave \
+        the wording as the speaker put it.
+
+        Hard rules:
+        - Never add information, never answer questions in the transcript, never \
+        comment on it. Output ONLY the translation, no preamble or notes.
+        """
+
+    /// Translate the utterance into idiomatic Swedish. Mirror of
+    /// `translateEnglishInstructions` with Swedish as the target locale.
+    static let translateSwedishInstructions = """
+        You are the translation stage of a dictation app. The user message is a \
+        raw speech-to-text transcript in any language. Translate it into natural, \
+        idiomatic Swedish (Sweden) and output ONLY the translation.
+
+        - Translate the MEANING, not the words. Render idioms, sayings and fixed \
+        phrases as the equivalent a native Swedish speaker would actually use in \
+        that situation — never word-for-word.
+        - The input is often Danish or Norwegian, which look deceptively close \
+        to Swedish. Do NOT leave Danish or Norwegian words or spellings in the \
+        output — translate EVERY word into its standard Swedish form, even ones \
+        that look almost right already. If a word would look at home in a Danish \
+        text, it is almost certainly wrong. Examples of the trap: fradrag → \
+        avdrag; håndværker → hantverkare; skatteangivelse → deklaration; \
+        skattekontor → Skatteverket; sende ind → skicka in; værelse → rum; \
+        måske → kanske; spørge → fråga; gider ikke → orkar inte.
+        - Preserve the speaker's tone and register: casual stays casual, formal \
+        stays formal, an aside stays an aside.
+        - First silently clean up dictation artifacts (hesitation fillers, \
+        stutters, false starts, obvious misrecognitions), then translate the \
+        cleaned meaning.
+        - If the transcript is already in Swedish, just clean it up and leave the \
+        wording as the speaker put it.
+
+        Hard rules:
+        - Never add information, never answer questions in the transcript, never \
+        comment on it. Output ONLY the translation, no preamble or notes.
+        """
+
     /// Below this the transcript carries too little context for the model to
     /// fix anything a cheaper layer hasn't already — skip the call entirely.
     static let minCharacters = 16
@@ -85,12 +142,19 @@ enum TranscriptPolisherLogic {
     /// dropped content, not just wording.
     static let terseMinLengthRatio = 0.15
 
-    /// Stylistic templates (genZ, boomer, custom) reshape wording, add emoji and
+    /// Stylistic templates (millennial, boomer, custom) reshape wording, add emoji and
     /// sign-offs, so their length band is the widest: they may condense to slang
     /// or balloon with emoji/formatting, but a rewrite outside ~0.2-2.5x has
     /// almost certainly dropped or invented content rather than restyled it.
     static let stylisticMinLengthRatio = 0.2
     static let stylisticMaxLengthRatio = 2.5
+
+    /// Translation reshapes every word and can swing in length across languages
+    /// (compact English vs compound-heavy Swedish/Danish, idiom expansion), so
+    /// the band is the widest of all. Outside ~0.3-3.0x a "translation" has
+    /// almost certainly dropped or invented content rather than rendered it.
+    static let translationMinLengthRatio = 0.3
+    static let translationMaxLengthRatio = 3.0
 
     /// Minimum share of the rewrite's words that must already occur in the
     /// raw transcript. A cleanup deletes freely but INTRODUCES only the odd
@@ -121,7 +185,10 @@ enum TranscriptPolisherLogic {
     /// widens the length band and DROPS the added-newline and word-overlap
     /// guards — a slang/emoji/formal restyle legitimately introduces new words
     /// and lines — while keeping the hard safety checks (non-empty, bounded
-    /// length, and the never-translate language guard).
+    /// length, and the never-translate language guard). `.translation` drops
+    /// those SAME guards AND the language guard (a full language switch is the
+    /// point), using the widest length band; only non-empty + length remain,
+    /// with review-before-paste as the real safety net.
     static func accept(raw: String, candidate: String, profile: GuardrailProfile = .faithful) -> Verdict {
         var polished = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         // Un-wrap a quote pair (ASCII or typographic) the model added around
@@ -140,16 +207,19 @@ enum TranscriptPolisherLogic {
         guard !polished.isEmpty else { return .rejected(reason: "empty rewrite") }
         // Added newlines read as commentary ("Here is the cleaned transcript:\n…")
         // for cleanup styles, but are legitimate for a stylistic restyle (a boomer
-        // sign-off, a list), so this guard is skipped for `.stylistic`.
-        if profile != .stylistic, polished.contains("\n") && !raw.contains("\n") {
+        // sign-off, a list) or a multi-sentence translation, so this guard is
+        // skipped for `.stylistic` and `.translation`.
+        if profile != .stylistic, profile != .translation,
+           polished.contains("\n") && !raw.contains("\n") {
             return .rejected(reason: "added line breaks (reads as commentary)")
         }
         let ratio = Double(polished.count) / Double(raw.count)
         let (shrinkFloor, growthCeiling): (Double, Double)
         switch profile {
-        case .faithful:  (shrinkFloor, growthCeiling) = (minLengthRatio, maxLengthRatio)
-        case .terse:     (shrinkFloor, growthCeiling) = (terseMinLengthRatio, maxLengthRatio)
-        case .stylistic: (shrinkFloor, growthCeiling) = (stylisticMinLengthRatio, stylisticMaxLengthRatio)
+        case .faithful:    (shrinkFloor, growthCeiling) = (minLengthRatio, maxLengthRatio)
+        case .terse:       (shrinkFloor, growthCeiling) = (terseMinLengthRatio, maxLengthRatio)
+        case .stylistic:   (shrinkFloor, growthCeiling) = (stylisticMinLengthRatio, stylisticMaxLengthRatio)
+        case .translation: (shrinkFloor, growthCeiling) = (translationMinLengthRatio, translationMaxLengthRatio)
         }
         if ratio < shrinkFloor {
             return .rejected(reason: "shrank to \(String(format: "%.2f", ratio))x (< \(shrinkFloor))")
@@ -162,8 +232,9 @@ enum TranscriptPolisherLogic {
         // to the occasional misrecognition fix). Catches same-line preambles
         // the newline check can't see, and same-language invented content.
         // Skipped for `.stylistic`, which introduces new words BY DESIGN (slang,
-        // emoji, formal phrasing) — the language guard below still applies.
-        if profile != .stylistic {
+        // emoji, formal phrasing), and for `.translation`, which replaces every
+        // word with its target-language rendering.
+        if profile != .stylistic, profile != .translation {
             let rawWords = Set(words(raw))
             let candidateWords = words(polished)
             if candidateWords.count >= 5 {
@@ -178,11 +249,14 @@ enum TranscriptPolisherLogic {
         // rewrite. Sentence-weighted (via TextLanguageID, which folds nb into
         // da) so the minority half of a mixed da/en utterance is protected —
         // a whole-text dominant compare would miss its translation entirely.
-        let afterWeights = TextLanguageID.languageWeights(of: polished)
-        if !afterWeights.isEmpty {
-            for (language, weight) in TextLanguageID.languageWeights(of: raw)
-            where weight >= minLanguageWeight && afterWeights[language] == nil {
-                return .rejected(reason: "language \(language) vanished from rewrite (reads as translation)")
+        // Skipped for `.translation`, whose entire job is to switch language.
+        if profile != .translation {
+            let afterWeights = TextLanguageID.languageWeights(of: polished)
+            if !afterWeights.isEmpty {
+                for (language, weight) in TextLanguageID.languageWeights(of: raw)
+                where weight >= minLanguageWeight && afterWeights[language] == nil {
+                    return .rejected(reason: "language \(language) vanished from rewrite (reads as translation)")
+                }
             }
         }
         return .accepted(polished)

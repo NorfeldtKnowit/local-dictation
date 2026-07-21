@@ -56,21 +56,33 @@ transcribe → inject:
   accumulated output via the protocol's `onPartial` (display-only; only
   the final, guardrail-checked text may paste).
 - `TranscriptPolisherLogic.swift` — pure polish instructions
-  (`instructions`/`terseInstructions` constants) + `accept` guardrails keyed
-  off a `GuardrailProfile`: `.faithful` (full guards), `.terse` (looser 0.15
-  shrink floor), `.stylistic` (widened 0.2-2.5 band; DROPS the word-overlap
-  and added-newline guards so slang/emoji restyles pass, keeps empty + the
-  never-translate language guard).
+  (`instructions`/`terseInstructions`/`translateEnglishInstructions`/
+  `translateSwedishInstructions` constants) + `accept` guardrails keyed off a
+  `GuardrailProfile`: `.faithful` (full guards), `.terse` (looser 0.15 shrink
+  floor), `.stylistic` (widened 0.2-2.5 band; DROPS the word-overlap and
+  added-newline guards so slang/emoji restyles pass, keeps empty + the
+  never-translate language guard), `.translation` (widest 0.3-3.0 band; drops
+  those SAME guards AND the never-translate language guard — a full language
+  switch is the point — leaving only non-empty + length, with review-before-
+  paste as the real safety net).
 - `PromptTemplate.swift` — `PromptTemplate` (id/name/instructions/profile) +
-  `GuardrailProfile`. Built-ins `.standard` (faithful, inline default) and
-  `.terse` (default review row). Threads through the polish path in place of
-  the old `PolishStyle` enum.
+  `GuardrailProfile`. Built-ins `.standard` (faithful, inline default),
+  `.terse` (default review row), and the two translators `.translateEnglish` /
+  `.translateSwedish` (`.translation` profile, idiomatic-not-literal prompts).
+  Threads through the polish path in place of the old `PolishStyle` enum.
 - `PromptTemplateStore.swift` — built-ins + user `.md` files from
   `~/Library/Application Support/local-dictation/templates/` (stem = name,
   contents = instructions, profile `.stylistic`; a file id matching a built-in
-  overrides it). `ensureSeeded()` writes GenZ/Millennial/Boomer starters
-  once; `openTemplatesFolder()` reveals it in Finder. The `Polish Style ▸`
-  menu picks the template for the review row (`LanguageSetting.selectedTemplate`).
+  overrides it). The translators are built-ins, NOT seeded files, precisely
+  because a file-backed template is forced to `.stylistic` (whose language
+  guard would reject every translation). `ensureSeeded()` writes
+  Millennial/Boomer/Corporate/Marketing starters once and one-shot RETIRES
+  starters listed in `retiredStarters` (GenZ, dropped 2026-07-21 for the
+  translators): it deletes a leftover file only when the name is still in the
+  `.seeded` marker (i.e. WE seeded it), then drops the name so a later
+  user-authored file of that name is never touched. `openTemplatesFolder()`
+  reveals it in Finder. The `Polish Style ▸` menu picks the template for the
+  review row (`LanguageSetting.selectedTemplate`).
 - `DictationPipeline.swift` — actor tying gate → route → transcribe → filter
   → polish together; the single reuse point for both GUI and CLI.
 - `LanguageSetting.swift` — `UserDefaults`-backed language pin + accuracy

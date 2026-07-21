@@ -33,9 +33,20 @@ struct PromptTemplateStore {
         return base.appendingPathComponent("local-dictation/templates", isDirectory: true)
     }
 
-    /// Always present, never file-backed — the safe faithful cleanup and the
-    /// default review rewrite.
-    static let builtIns: [PromptTemplate] = [.standard, .terse]
+    /// Always present, never file-backed — the safe faithful cleanup, the
+    /// default review rewrite, and the two translators (built-in because they
+    /// need the `.translation` guardrail profile, which file-backed templates
+    /// can't reach — the store forces those to `.stylistic`).
+    static let builtIns: [PromptTemplate] = [
+        .standard, .terse, .translateEnglish, .translateSwedish,
+    ]
+
+    /// Seeded starter files that have since been retired. On seed we delete a
+    /// matching file (only when we originally seeded it — its name is in the
+    /// `.seeded` marker) so an existing install's leftover starter disappears;
+    /// the name stays in the marker, so it is never re-seeded. GenZ was retired
+    /// 2026-07-21 in favour of the two translators.
+    static let retiredStarters: Set<String> = ["GenZ"]
 
     /// Built-ins first, then custom `.md` files (a matching id overrides the
     /// built-in in place, otherwise appends after them alphabetically).
@@ -88,6 +99,19 @@ struct PromptTemplateStore {
         // clobbered: we only write when the file is absent.
         var seededNames = Self.readSeededMarker(at: markerURL, fileManager: fileManager)
         var wrote = false
+        // Retire starters we previously seeded: a ONE-SHOT cleanup keyed on the
+        // name being in the marker (i.e. WE seeded it). Delete the leftover file
+        // and drop the name from the marker, so it is never re-seeded (it is no
+        // longer a starter) and a later user-authored file of the same name is
+        // never touched on subsequent launches.
+        for name in Self.retiredStarters where seededNames.contains(name) {
+            let url = directory.appendingPathComponent("\(name).md")
+            if fileManager.fileExists(atPath: url.path) {
+                try? fileManager.removeItem(at: url)
+                Log.info("retired starter template \(name)", "templates")
+            }
+            seededNames.remove(name)
+        }
         for (name, body) in Self.starterTemplates where !seededNames.contains(name) {
             let url = directory.appendingPathComponent("\(name).md")
             if !fileManager.fileExists(atPath: url.path) {
@@ -122,7 +146,10 @@ struct PromptTemplateStore {
     /// to be early and emphatic: a 4B model otherwise translates non-English
     /// input to English for the restyle, which the polish language-guard then
     /// (correctly) rejects — so a Danish restyle would only ever fall back to a
-    /// raw-only review. Verified live 2026-07-21 (Danish GenZ stays Danish).
+    /// raw-only review. Verified live 2026-07-21 (Danish restyle stays Danish).
+    /// Note: the translator built-ins deliberately do the opposite (they carry
+    /// the `.translation` profile, whose language guard is off) — this rule is
+    /// for the STYLISTIC starters only.
     static let languageRule = """
         LANGUAGE — the most important rule: write the rewrite in the EXACT SAME \
         language as the transcript (Danish stays Danish, English stays English, \
@@ -132,30 +159,9 @@ struct PromptTemplateStore {
         """
 
     /// Filenames chosen so the stem reads well as a menu title and badge
-    /// (`GenZ` → badge `GENZ`). Same shape as the built-in instructions:
+    /// (`Boomer` → badge `BOOMER`). Same shape as the built-in instructions:
     /// restyle freely, but never invent claims, answer questions, or translate.
     static let starterTemplates: [(name: String, body: String)] = [
-        ("GenZ", """
-        You are the cleanup-and-restyle stage of a dictation app. The user \
-        message is a raw speech-to-text transcript. Rewrite it in a Gen Z voice \
-        — casual, punchy, lowercase-leaning, current youth slang, a couple of \
-        emoji at most — and output ONLY that rewritten transcript.
-
-        \(languageRule)
-
-        Allowed edits:
-        1. Delete hesitation fillers and collapse stutters, restarts and \
-        duplicated words.
-        2. Fix words that are clearly misrecognitions given the context.
-        3. Restyle freely: swap phrasing for that language's youth slang, lean \
-        lowercase, keep it short and punchy. English slang like "fr", "ngl", \
-        "lowkey", "tbh", "it's giving" is for ENGLISH input only.
-
-        Hard rules:
-        - Keep every point the speaker actually made — restyle the wording, \
-        never invent new claims and never answer questions in the transcript.
-        - Output only the rewritten transcript, no preamble or commentary.
-        """),
         ("Millennial", """
         You are the cleanup-and-restyle stage of a dictation app. The user \
         message is a raw speech-to-text transcript. Rewrite it in an \

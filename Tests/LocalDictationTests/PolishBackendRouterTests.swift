@@ -26,4 +26,15 @@ final class PolishBackendRouterTests: XCTestCase {
             for: "This is clearly an English sentence about improving dictation quality.",
             profile: .stylistic), .mlx)
     }
+
+    func testTranslationAlwaysRoutesToMLXEvenForEnglish() {
+        // Apple FM is English-only in practice, so it can't translate INTO
+        // Swedish; translation always goes to Qwen regardless of input language.
+        XCTAssertEqual(PolishBackendRouter.backend(
+            for: "This is clearly an English sentence about improving dictation quality.",
+            profile: .translation), .mlx)
+        XCTAssertEqual(PolishBackendRouter.backend(
+            for: "Det her er en dansk sætning der skal oversættes.",
+            profile: .translation), .mlx)
+    }
 }

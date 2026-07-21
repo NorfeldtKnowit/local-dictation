@@ -184,12 +184,52 @@ final class TranscriptPolisherLogicTests: XCTestCase {
         }
     }
 
+    // MARK: translation profile (language guard off)
+
+    func testTranslationAcceptsLanguageSwitchThatStylisticRejects() {
+        // A Danish->English translation: the never-translate guard (kept by every
+        // other profile, including stylistic) must reject it; .translation accepts.
+        let danish = "Komplet omskrivning af forgreningen, så vi kan starte forfra med det samme."
+        let english = "Complete rewrite of the branch so we can start over right away."
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: danish, candidate: english,
+                                                              profile: .stylistic) else {
+            return XCTFail("stylistic profile must reject a translation (language guard)")
+        }
+        guard case .accepted(english) = TranscriptPolisherLogic.accept(raw: danish, candidate: english,
+                                                                       profile: .translation) else {
+            return XCTFail("translation profile must accept a language switch")
+        }
+    }
+
+    func testTranslationStillRejectsEmptyAndRunawayGrowth() {
+        // The hard safety guards survive dropping the language guard.
+        let danish = "Komplet omskrivning af forgreningen, så vi kan starte forfra med det samme."
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: danish, candidate: "",
+                                                              profile: .translation) else {
+            return XCTFail("translation must still reject an empty rewrite")
+        }
+        let huge = String(repeating: "and here is a whole invented extra clause the speaker never said, ",
+                          count: 10)
+        guard case .rejected = TranscriptPolisherLogic.accept(raw: danish, candidate: huge,
+                                                              profile: .translation) else {
+            return XCTFail("translation must still reject runaway growth (> 3.0x)")
+        }
+    }
+
     func testBuiltInTemplateInstructions() {
         XCTAssertEqual(PromptTemplate.standard.instructions, TranscriptPolisherLogic.instructions)
         XCTAssertEqual(PromptTemplate.terse.instructions, TranscriptPolisherLogic.terseInstructions)
         XCTAssertNotEqual(PromptTemplate.terse.instructions, PromptTemplate.standard.instructions)
         XCTAssertEqual(PromptTemplate.standard.profile, .faithful)
         XCTAssertEqual(PromptTemplate.terse.profile, .terse)
+        XCTAssertEqual(PromptTemplate.translateEnglish.profile, .translation)
+        XCTAssertEqual(PromptTemplate.translateSwedish.profile, .translation)
+        XCTAssertEqual(PromptTemplate.translateEnglish.instructions,
+                       TranscriptPolisherLogic.translateEnglishInstructions)
+        XCTAssertEqual(PromptTemplate.translateSwedish.instructions,
+                       TranscriptPolisherLogic.translateSwedishInstructions)
+        XCTAssertNotEqual(PromptTemplate.translateEnglish.instructions,
+                          PromptTemplate.translateSwedish.instructions)
     }
 
     func testTranslationRejected() {

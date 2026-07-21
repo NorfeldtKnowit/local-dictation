@@ -17,7 +17,7 @@ struct ReviewRequest: Equatable, Sendable {
     /// replaces it with the user's text and re-polishes from there.
     var raw: String
     /// Uppercased display name of the polish template driving the rewrite row
-    /// (e.g. "TERSE", "GENZ") — the second candidate's badge and countdown label.
+    /// (e.g. "TERSE", "BOOMER") — the second candidate's badge and countdown label.
     var badge: String = "TERSE"
     /// Template id that produced (or will produce) the rewrite row — carried so a
     /// Save of an edited RAW can re-polish with the same style. Display-only to

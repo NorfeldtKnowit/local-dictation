@@ -53,8 +53,8 @@ final class MLXPolisherSmokeTests: XCTestCase {
 
     /// English stylistic restyle on Qwen — the case that motivated routing
     /// stylistic templates to MLX (Apple's FM neutralises/echoes bold styles).
-    /// Verifies Qwen produces a genuinely DIFFERENT rewrite for GenZ, Corporate
-    /// and Marketing rather than echoing the input.
+    /// Verifies Qwen produces a genuinely DIFFERENT rewrite for Millennial,
+    /// Corporate and Marketing rather than echoing the input.
     func testEnglishStylisticRestylesActuallyChangeTheText() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["LOCAL_DICTATION_MLX_SMOKE"] == "1",
@@ -65,7 +65,7 @@ final class MLXPolisherSmokeTests: XCTestCase {
 
         let raw = "Let's circle back on this one and let's double down on the quantum "
                 + "computer LLM model for the third quarter or Q3."
-        let styles: [(String, GuardrailProfile)] = [("GenZ", .stylistic),
+        let styles: [(String, GuardrailProfile)] = [("Millennial", .stylistic),
                                                      ("Corporate", .stylistic),
                                                      ("Marketing", .stylistic)]
         for (name, profile) in styles {
@@ -88,7 +88,7 @@ final class MLXPolisherSmokeTests: XCTestCase {
     /// Danish stylistic restyles must STAY Danish (not translate to English).
     /// Regression for the prominent `languageRule` in the starter prompts: a
     /// translation trips the polish language-guard and reduces a restyle to a
-    /// raw-only review. All five starters must produce Danish that passes.
+    /// raw-only review. All four starters must produce Danish that passes.
     func testDanishStylisticRestylesStayDanish() async throws {
         try XCTSkipUnless(
             ProcessInfo.processInfo.environment["LOCAL_DICTATION_MLX_SMOKE"] == "1",
@@ -96,7 +96,7 @@ final class MLXPolisherSmokeTests: XCTestCase {
         let polisher = MLXPolisher()
         await polisher.warmUp()
         let raw = "Lad os tage på en udflugt sammen, hvor vi kan vise kærlighed til hinanden."
-        for name in ["GenZ", "Millennial", "Boomer", "Corporate", "Marketing"] {
+        for name in ["Millennial", "Boomer", "Corporate", "Marketing"] {
             let template = PromptTemplate(id: name.lowercased(), name: name,
                                           instructions: instructions(for: name), profile: .stylistic)
             let result = await polisher.polish(raw, template: template)
